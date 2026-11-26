@@ -1,0 +1,33 @@
+#!/bin/bash
+# Builds WGToggle.app (universal) and WGToggle.dmg into ./build
+set -euo pipefail
+cd "$(dirname "$0")"
+
+APP=build/WGToggle.app
+rm -rf build && mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+
+for arch in arm64 x86_64; do
+  swiftc -O -target $arch-apple-macos13 -o build/WGToggle-$arch Sources/*.swift
+done
+lipo -create build/WGToggle-arm64 build/WGToggle-x86_64 -output "$APP/Contents/MacOS/WGToggle"
+rm build/WGToggle-*
+
+cp Resources/Info.plist "$APP/Contents/"
+
+# App icon rendered from an SF Symbol
+swift Resources/make-icon.swift build/AppIcon.iconset
+iconutil -c icns build/AppIcon.iconset -o "$APP/Contents/Resources/AppIcon.icns"
+rm -rf build/AppIcon.iconset
+
+codesign --force --deep --sign - "$APP"
+
+# DMG with drag-to-Applications layout
+STAGE=build/dmg
+mkdir -p "$STAGE"
+cp -R "$APP" "$STAGE/"
+cp README.md "$STAGE/"
+ln -s /Applications "$STAGE/Applications"
+hdiutil create -volname WGToggle -srcfolder "$STAGE" -ov -format UDZO build/WGToggle.dmg >/dev/null
+rm -rf "$STAGE"
+
+echo "Built: $(pwd)/build/WGToggle.dmg"
