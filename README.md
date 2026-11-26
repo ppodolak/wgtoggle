@@ -2,12 +2,17 @@
 
 <h1 align="center">WGToggle</h1>
 
-A small native macOS menu bar app for running **several WireGuard tunnels at the same time** with `wg-quick`. Turn tunnels on one at a time or all together, and add new ones without opening a terminal.
+A small native macOS menu bar app for running **several WireGuard tunnels at the same time** with `wg-quick`. Turn tunnels on one at a time or all together, see live traffic, catch stuck tunnels, and add new ones without opening a terminal.
+
+```bash
+brew install --cask ppodolak/tap/wgtoggle
+```
 
 <p align="center">
   <a href="https://github.com/ppodolak/wgtoggle/actions/workflows/build.yml"><img alt="Build" src="https://github.com/ppodolak/wgtoggle/actions/workflows/build.yml/badge.svg?branch=main"></a>
   <a href="https://github.com/ppodolak/wgtoggle/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/ppodolak/wgtoggle?color=black&cacheSeconds=3600"></a>
   <a href="https://github.com/ppodolak/wgtoggle/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/ppodolak/wgtoggle/total?color=black&cacheSeconds=3600"></a>
+  <a href="https://github.com/ppodolak/homebrew-tap"><img alt="Homebrew" src="https://img.shields.io/badge/brew-ppodolak%2Ftap%2Fwgtoggle-black?logo=homebrew&logoColor=white"></a>
   <img alt="macOS 13+" src="https://img.shields.io/badge/macOS-13%2B-black">
   <img alt="Swift 6.1+" src="https://img.shields.io/badge/Swift-6.1%2B-black">
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/github/license/ppodolak/wgtoggle?color=black&cacheSeconds=3600"></a>
@@ -151,7 +156,7 @@ The log file is `0600` (readable only by you) and rotates at 1 MB, keeping one b
 **Config contents, private keys and preshared keys are never logged.**
 
 ```
-2026-11-26T20:46:30.086Z INFO  WGToggle 1.1 started; tunnels: wg-dev, wg-prod
+2026-11-26T22:12:01.204Z INFO  WGToggle 1.3.0 started; tunnels: wg-dev, wg-prod
 2026-11-26T20:47:02.511Z INFO  wg-quick up: wg-dev
 2026-11-26T20:47:04.020Z INFO  wg-quick up ok
 [#] wireguard-go utun
@@ -204,10 +209,10 @@ cd wgtoggle
 
 Run the tests with `Tests/run.sh`. They cover config parsing, overlap checks, split-DNS conversion, QR decoding, version comparison and the helper's input checks.
 
-CI (`.github/workflows/build.yml`) runs the tests and builds every push and pull request. Pushing a tag like `v1.3.0` builds with that version and publishes a GitHub Release with the DMG and its checksum:
+CI (`.github/workflows/build.yml`) runs the tests and builds every push and pull request. Pushing a tag like `v1.4.0` builds with that version, publishes a GitHub Release with the DMG and its checksum, and updates the cask in [ppodolak/homebrew-tap](https://github.com/ppodolak/homebrew-tap) (needs a `TAP_TOKEN` secret with write access to that repo):
 
 ```bash
-git tag v1.3.0 && git push origin v1.3.0
+git tag v1.4.0 && git push origin v1.4.0
 ```
 
 The build needs the Xcode Command Line Tools (`xcode-select --install`). It compiles separate arm64 and x86_64 binaries, merges them with `lipo`, draws the icon from an SF Symbol, ad-hoc signs the app, and packs the DMG.
