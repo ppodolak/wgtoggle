@@ -59,29 +59,22 @@ Each release includes a `.sha256` file you can use to check the download: `shasu
 
 ## Usage
 
-```
- ┌──────────────────────────────┐
-    │ Tunnels                      │
-    │ wg-dev                     │  ← click to turn on/off
-    │ wg-prod                    │
-    ├──────────────────────────────┤
-    │ Connect All                  │
-    │ Disconnect All               │
-    ├──────────────────────────────┤
-    │ Import Config Files…         │
-    │ Add Tunnel (Paste Config)…   │
-    │ Remove Tunnel              ▸ │
-    │ Open Config Folder           │
-    │ Log Explorer…            ⌘L  │
-    │ Show in Dock                 │
-    │ Notifications                │
-    │ Launch at Login              │
-    ├──────────────────────────────┤
-    │ Buy Me a Coffee…             │
-    ├──────────────────────────────┤
-    │ Quit                     ⌘Q  │
-    └──────────────────────────────┘
-```
+Click the shield in the menu bar:
+
+| Menu item | What it does |
+|---|---|
+| **wg-dev**, **wg-prod**, … | One line per tunnel. A checkmark means it's up. Click to connect or disconnect. |
+| **Connect All** / **Disconnect All** | Bring every tunnel up or down. |
+| **Import Config Files…** | Add one or more `.conf` files. |
+| **Add Tunnel (Paste Config)…** | Paste a config and give it a name. |
+| **Remove Tunnel** ▸ | Delete a tunnel (it's disconnected first). |
+| **Open Config Folder** | Show the configs in Finder. |
+| **Log Explorer…** `⌘L` | Open the log window. |
+| **Show in Dock** | Show or hide the Dock icon. |
+| **Notifications** | Turn banners on or off. |
+| **Launch at Login** | Start WGToggle when you log in. |
+| **Buy Me a Coffee…** | Support the project. |
+| **Quit** `⌘Q` | Quit the app. Tunnels stay up. |
 
 - Configs live in **`/opt/homebrew/etc/wireguard/`** on Apple Silicon or `/usr/local/etc/wireguard/` on Intel. `/etc/wireguard/` is read too.
 - The tunnel name is the file name. wg-quick only accepts names of up to **15 characters** (`A–Z a–z 0–9 _ = + . -`). When importing, you'll be asked to rename anything longer.
