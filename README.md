@@ -259,7 +259,7 @@ WGToggle is free and open source. If it saves you some time, you can buy me a co
 
 <a href="https://buymeacoffee.com/ppodolak"><img src="https://img.buymeacoffee.com/button-api/?text=Buy%20me%20a%20coffee&emoji=&slug=ppodolak&button_colour=FFDD00&font_colour=000000&font_family=Inter&outline_colour=000000&coffee_colour=ffffff" height="44" alt="Buy Me a Coffee"></a>
 
-Bug reports and pull requests are welcome too.
+Bug reports and pull requests are welcome too, see [CONTRIBUTING.md](CONTRIBUTING.md). Security issues: [SECURITY.md](SECURITY.md). Changes per version: [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
