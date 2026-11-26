@@ -11,6 +11,7 @@ A small native macOS menu bar app for running **several WireGuard tunnels at the
   <img alt="macOS 13+" src="https://img.shields.io/badge/macOS-13%2B-black">
   <img alt="Swift" src="https://img.shields.io/badge/Swift-6-black">
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/github/license/ppodolak/wgtoggle?color=black"></a>
+  <a href="https://buymeacoffee.com/ppodolak"><img alt="Buy Me a Coffee" src="https://img.shields.io/badge/Buy%20Me%20a%20Coffee-ffdd00?logo=buymeacoffee&logoColor=black"></a>
 </p>
 
 ---
@@ -26,6 +27,7 @@ A small native macOS menu bar app for running **several WireGuard tunnels at the
 - [Build from source](#build-from-source)
 - [Project layout](#project-layout)
 - [Troubleshooting](#troubleshooting)
+- [Support](#support)
 
 ---
 
@@ -74,6 +76,8 @@ Each release includes a `.sha256` file you can use to check the download: `shasu
     │ Show in Dock                 │
     │ Notifications                │
     │ Launch at Login              │
+    ├──────────────────────────────┤
+    │ Buy Me a Coffee…             │
     ├──────────────────────────────┤
     │ Quit                     ⌘Q  │
     └──────────────────────────────┘
@@ -215,6 +219,14 @@ WGToggle/
 | Launch at Login fails | Move the app to `/Applications` first. |
 | No notifications appear | System Settings → Notifications → **WGToggle** → Allow. Also check the **Notifications** item in the menu. |
 | Something else | Menu → **Log Explorer…**. |
+
+## Support
+
+WGToggle is free and open source. If it saves you some time, you can buy me a coffee. It keeps the side projects going.
+
+<a href="https://buymeacoffee.com/ppodolak"><img src="https://img.buymeacoffee.com/button-api/?text=Buy%20me%20a%20coffee&emoji=&slug=ppodolak&button_colour=FFDD00&font_colour=000000&font_family=Inter&outline_colour=000000&coffee_colour=ffffff" height="44" alt="Buy Me a Coffee"></a>
+
+Bug reports and pull requests are welcome too.
 
 ## License
 

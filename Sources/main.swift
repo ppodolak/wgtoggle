@@ -290,6 +290,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         login.state = SMAppService.mainApp.status == .enabled ? .on : .off
         menu.addItem(login)
         menu.addItem(.separator())
+        menu.addItem(item("Buy Me a Coffee…", #selector(openDonate)))
         menu.addItem(item("Quit", #selector(quit), key: "q"))
     }
 
@@ -697,6 +698,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    @objc func openDonate() { NSWorkspace.shared.open(URL(string: "https://buymeacoffee.com/ppodolak")!) }
     @objc func openBrew() { NSWorkspace.shared.open(URL(string: "https://brew.sh")!) }
     @objc func quit() { NSApp.terminate(nil) }
 
