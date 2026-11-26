@@ -5,11 +5,11 @@
 A small native macOS menu bar app for running **several WireGuard tunnels at the same time** with `wg-quick`. Turn tunnels on one at a time or all together, and add new ones without opening a terminal.
 
 <p align="center">
-  <a href="https://github.com/ppodolak/wgtoggle/actions/workflows/build.yml"><img alt="Build" src="https://github.com/ppodolak/wgtoggle/actions/workflows/build.yml/badge.svg"></a>
+  <a href="https://github.com/ppodolak/wgtoggle/actions/workflows/build.yml"><img alt="Build" src="https://github.com/ppodolak/wgtoggle/actions/workflows/build.yml/badge.svg?branch=main"></a>
   <a href="https://github.com/ppodolak/wgtoggle/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/ppodolak/wgtoggle?color=black"></a>
   <a href="https://github.com/ppodolak/wgtoggle/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/ppodolak/wgtoggle/total?color=black"></a>
   <img alt="macOS 13+" src="https://img.shields.io/badge/macOS-13%2B-black">
-  <img alt="Swift" src="https://img.shields.io/badge/Swift-6-black">
+  <img alt="Swift 6.1+" src="https://img.shields.io/badge/Swift-6.1%2B-black">
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/github/license/ppodolak/wgtoggle?color=black"></a>
   <a href="https://buymeacoffee.com/ppodolak"><img alt="Buy Me a Coffee" src="https://img.shields.io/badge/Buy%20Me%20a%20Coffee-ffdd00?logo=buymeacoffee&logoColor=black"></a>
 </p>
@@ -144,23 +144,11 @@ The log file is `0600` (readable only by you) and rotates at 1 MB, keeping one b
 
 ## Security
 
-WGToggle starts commands as root, so it was reviewed for security problems. Here is what was found and how each issue is handled.
+WGToggle starts commands as root, so it's built with a few safeguards: hook commands must be approved before they run, tunnel names are restricted, configs and logs are readable only by you, and risky configs trigger a warning.
 
 ### Threat model
 
 A config is a secret (it holds your private key), and it's also code (wg-quick runs its hooks as **root**). The main danger is **something running as your user getting root** through a tunnel config.
-
-### Findings and fixes
-
-| # | Risk | Severity | Fix |
-|---|---|---|---|
-| 1 | **Root code in hooks.** wg-quick runs `PreUp/PostUp/PreDown/PostDown` as root via bash. The Homebrew config folder is writable by your user, so any process running as you could add a hook and wait for your next admin prompt. | High | Before **every** up or down, the config is re-read. If it has hooks and its SHA-256 isn't on the approved list, the exact hook lines are shown and you must click **Allow**. A changed file needs approval again. |
-| 2 | **Shell injection** through file names or paths in the root command. | Medium | Tunnel names must match `^[a-zA-Z0-9_=+.-]{1,15}$`, and anything else in the folders is ignored. Every path is single-quote escaped for the shell and again for AppleScript. |
-| 3 | **Symlink/TOCTOU attacks when saving.** A root `chmod` or `cp` on a path someone else can change could hit an unrelated file. | Medium | Writable folder: the app writes a `0600` temp file in the same folder, then `rename()`s it into place atomically, so a symlink at the target is replaced, not followed. Root-owned folder: `install -m 600` writes a new file, with no `chmod` on a path that can be swapped. |
-| 4 | **Private key exposure** through file permissions or logs. | Medium | Configs are always saved `0600`. The log folder is `0700` and the log file `0600`. Config contents are never logged. |
-| 5 | **Silent DNS or traffic capture.** An imported config with `DNS =` or `0.0.0.0/0` takes over your DNS or all your traffic. | Low | You're warned when the config is added and must confirm. |
-| 6 | **Oversized or garbage imports.** | Low | Files over 64 KB, non-UTF-8 files, and files without `[Interface]`, `PrivateKey` and `[Peer]` are rejected. |
-| 7 | **Broken CIDRs in the overlap check.** | Info | Bad input is treated as "no overlap" and prefix lengths are capped at 32, so the check can't crash. |
 
 ### Remaining risks (by design)
 
