@@ -224,6 +224,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         Timer.scheduledTimer(withTimeInterval: 24 * 3600, repeats: true) { [weak self] _ in self?.checkForUpdates(manual: false) }
         Log.info("passwordless mode: \(Helper.isInstalled ? "on" : "off")")
         if CommandLine.arguments.contains("--show-logs") { MainActor.assumeIsolated { LogExplorer.show() } }
+        if CommandLine.arguments.contains("--show-about") { showAbout() }
         if findBinary("wg-quick") == nil {
             Log.warn("wg-quick not found in \(binDirs)")
             installTools()
@@ -352,6 +353,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(item("Check for Updates…", #selector(checkForUpdatesManual)))
         }
         menu.addItem(.separator())
+        menu.addItem(item("About WGToggle", #selector(showAbout)))
         menu.addItem(item("Buy Me a Coffee…", #selector(openDonate)))
         menu.addItem(item("Quit", #selector(quit), key: "q"))
     }
@@ -737,7 +739,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let main = NSMenu()
         let appItem = NSMenuItem(); main.addItem(appItem)
         let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "About WGToggle", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        appMenu.addItem(item("About WGToggle", #selector(showAbout)))
         appMenu.addItem(.separator())
         appMenu.addItem(item("Log Explorer…", #selector(showLog), key: "l"))
         appMenu.addItem(.separator())
@@ -1128,6 +1130,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         a.window.initialFirstResponder = nameEditable ? nameField : tv
         guard a.runModal() == .alertFirstButtonReturn else { return nil }
         return (nameField.stringValue, tv.string)
+    }
+
+    /// Standard About panel with icon, version, contact and links.
+    @objc func showAbout() {
+        let info = Bundle.main.infoDictionary ?? [:]
+        let version = info["CFBundleShortVersionString"] as? String ?? "?"
+        let build = info["CFBundleVersion"] as? String ?? "?"
+        let para = NSMutableParagraphStyle()
+        para.alignment = .center
+        para.paragraphSpacing = 4
+        let base: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize),
+            .foregroundColor: NSColor.secondaryLabelColor,
+            .paragraphStyle: para,
+        ]
+        func link(_ text: String, _ url: String) -> NSAttributedString {
+            var a = base
+            a[.link] = URL(string: url)!
+            a[.foregroundColor] = NSColor.linkColor
+            return NSAttributedString(string: text, attributes: a)
+        }
+        let credits = NSMutableAttributedString(string: "Run several WireGuard tunnels at once from the menu bar.\n\n", attributes: base)
+        credits.append(NSAttributedString(string: "Paweł Podolak\n", attributes: base))
+        credits.append(link("p.podolak@gmail.com", "mailto:p.podolak@gmail.com?subject=WGToggle%20\(version)"))
+        credits.append(NSAttributedString(string: "\n", attributes: base))
+        credits.append(link("github.com/ppodolak/wgtoggle", "https://github.com/ppodolak/wgtoggle"))
+        credits.append(NSAttributedString(string: "\n", attributes: base))
+        credits.append(link("Buy me a coffee", "https://buymeacoffee.com/ppodolak"))
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.orderFrontStandardAboutPanel(options: [
+            .applicationName: "WGToggle",
+            .applicationVersion: version,
+            .version: "Build \(build)",
+            .applicationIcon: NSApp.applicationIconImage as Any,
+            .credits: credits,
+            NSApplication.AboutPanelOptionKey(rawValue: "Copyright"): "© 2026 Paweł Podolak · MIT License",
+        ])
     }
 
     @objc func openDonate() { NSWorkspace.shared.open(URL(string: "https://buymeacoffee.com/ppodolak")!) }
