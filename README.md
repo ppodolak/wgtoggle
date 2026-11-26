@@ -57,6 +57,16 @@ A small native macOS menu bar app for running **several WireGuard tunnels at the
 
 ## Install
 
+With [Homebrew](https://brew.sh):
+
+```bash
+brew install --cask ppodolak/tap/wgtoggle
+```
+
+This also installs `wireguard-tools`. Update with `brew upgrade --cask wgtoggle`.
+
+Or manually:
+
 1. Download the latest **`WGToggle-x.y.z.dmg`** from [Releases](https://github.com/ppodolak/wgtoggle/releases/latest), open it then drag **WGToggle** into **Applications**.
 2. Launch it. A shield appears in the menu bar. The app has no Dock icon.
 3. *(Optional)* Turn on **Launch at Login** from the menu.
