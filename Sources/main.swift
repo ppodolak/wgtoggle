@@ -1,6 +1,8 @@
 import AppKit
+import QuartzCore
 import CryptoKit
 import OSLog
+import Network
 import ServiceManagement
 
 // MARK: - Logging
@@ -59,13 +61,32 @@ func findBinary(_ name: String) -> String? {
 
 /// Where imported configs go: the Homebrew prefix that holds wg-quick.
 var preferredConfigDir: String {
-    FileManager.default.fileExists(atPath: "/opt/homebrew") ? configDirs[0] : configDirs[1]
+    if Helper.isInstalled { return Helper.configDir }
+    return FileManager.default.fileExists(atPath: "/opt/homebrew") ? configDirs[0] : configDirs[1]
 }
 
 struct Tunnel {
     let name: String
     let path: String
-    var isUp: Bool { FileManager.default.fileExists(atPath: "\(runDir)/\(name).name") }
+    /// wg-quick leaves <name>.name behind if wireguard-go dies, so the name file alone isn't proof.
+    /// Up = name file exists AND the tunnel's interface is really there.
+    var isUp: Bool {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: "\(runDir)/\(name).name") else { return false }
+        if let addr = tunnelAddress(path) {
+            return interfaceTable().contains { $0.value.addr == addr }
+        }
+        // Config not readable (root-only): fall back to "some wireguard-go socket is alive".
+        return ((try? fm.contentsOfDirectory(atPath: runDir)) ?? []).contains { $0.hasSuffix(".sock") }
+    }
+}
+
+/// First IPv4 Address of a readable config, e.g. "10.8.0.2".
+func tunnelAddress(_ path: String) -> String? {
+    guard let conf = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
+    return confValues(conf, key: "address").flatMap { $0.split(separator: ",") }
+        .map { $0.trimmingCharacters(in: .whitespaces) }.first { $0.contains(".") }?
+        .split(separator: "/").first.map(String.init)
 }
 
 /// wg-quick derives the interface name from the file name: max 15 chars, limited charset.
@@ -76,7 +97,8 @@ func isValidName(_ s: String) -> Bool {
 func listTunnels() -> [Tunnel] {
     var seen = Set<String>()
     var result: [Tunnel] = []
-    for dir in configDirs {
+    let order = Helper.isInstalled ? [Helper.configDir] + configDirs.filter { $0 != Helper.configDir } : configDirs
+    for dir in order {
         guard let files = try? FileManager.default.contentsOfDirectory(atPath: dir) else { continue }
         for f in files.sorted() where f.hasSuffix(".conf") {
             let name = String(f.dropLast(5))
@@ -177,6 +199,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var installing = false
     var installError: String?
     var lastState: [String: Bool] = [:]
+    let health = HealthMonitor()
+    let statsQueue = DispatchQueue(label: "wgtoggle.stats")
+    var stats: [String: TunnelStats] = [:]
+    var availableUpdate: Updates.Release?
+    var pathMonitor: NWPathMonitor?
+    var userDisconnected = Set<String>()
 
     func applicationDidFinishLaunching(_ note: Notification) {
         let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
@@ -188,6 +216,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.menu = menu
         refreshIcon()
         Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in self?.refreshIcon() }
+        Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in self?.sampleStats() }
+        HotKey.action = { [weak self] in self?.toggleAllShortcut() }
+        HotKey.apply()
+        setupAutoConnect()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in self?.checkForUpdates(manual: false) }
+        Timer.scheduledTimer(withTimeInterval: 24 * 3600, repeats: true) { [weak self] _ in self?.checkForUpdates(manual: false) }
+        Log.info("passwordless mode: \(Helper.isInstalled ? "on" : "off")")
         if CommandLine.arguments.contains("--show-logs") { MainActor.assumeIsolated { LogExplorer.show() } }
         if findBinary("wg-quick") == nil {
             Log.warn("wg-quick not found in \(binDirs)")
@@ -211,17 +246,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             for (name, isUp) in state where lastState[name] != isUp {
                 Log.info("\(name) is now \(isUp ? "UP" : "DOWN")")
                 isUp ? Notify.connected(name) : Notify.disconnected(name)
+                // Dropped on its own (wireguard-go died, sleep, network change): bring it back.
+                if !isUp && !userDisconnected.contains(name) && AutoConnect.tunnels.contains(name) && Helper.isInstalled {
+                    Log.warn("\(name) dropped unexpectedly, reconnecting")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.autoConnect(reason: "drop") }
+                }
             }
         }
         lastState = state
 
-        let symbol = up.isEmpty ? "shield" : (up.count == tunnels.count ? "shield.fill" : "shield.lefthalf.filled")
+        let anyStuck = stats.values.contains { $0.stuck }
+        let symbol = anyStuck ? "exclamationmark.shield.fill"
+            : up.isEmpty ? "shield" : (up.count == tunnels.count ? "shield.fill" : "shield.lefthalf.filled")
         let cfg = NSImage.SymbolConfiguration(pointSize: 14, weight: .medium)
         let img = NSImage(systemSymbolName: symbol, accessibilityDescription: "WireGuard")?.withSymbolConfiguration(cfg)
         img?.isTemplate = true   // monochrome, adapts to light/dark menu bar
         statusItem.button?.image = img
-        statusItem.button?.toolTip = up.isEmpty ? "WireGuard: all down"
-            : "WireGuard up: " + up.map(\.name).joined(separator: ", ")
+        statusItem.button?.toolTip = anyStuck ? "WireGuard: a tunnel looks stuck"
+            : up.isEmpty ? "WireGuard: all down" : "WireGuard up: " + up.map(\.name).joined(separator: ", ")
     }
 
     func buildMenu(_ target: NSMenu? = nil) {
@@ -257,17 +299,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 mi.representedObject = t.path
                 mi.toolTip = t.path
                 mi.isEnabled = findBinary("wg-quick") != nil && busy == nil
+                mi.attributedTitle = tunnelTitle(t)
                 menu.addItem(mi)
+                // Hold ⌥ to copy the tunnel's IP instead.
+                if let addr = stats[t.name]?.address {
+                    let alt = item("Copy \(t.name) IP  \(addr)", #selector(copyIP(_:)))
+                    alt.representedObject = addr
+                    alt.isAlternate = true
+                    alt.keyEquivalentModifierMask = .option
+                    menu.addItem(alt)
+                }
             }
             menu.addItem(.separator())
             menu.addItem(item("Connect All", #selector(allUp)))
             menu.addItem(item("Disconnect All", #selector(allDown)))
+            menu.addItem(profilesMenu(tunnels))
         }
 
         menu.addItem(.separator())
         menu.addItem(item("Import Config Files…", #selector(importConfig)))
         menu.addItem(item("Add Tunnel (Paste Config)…", #selector(pasteConfig)))
+        menu.addItem(item("Import QR Code…", #selector(importQR)))
         if !tunnels.isEmpty {
+            menu.addItem(submenu("Edit Tunnel", tunnels.map { t in
+                let mi = item(t.name, #selector(editTunnel(_:))); mi.representedObject = t.path; return mi
+            }))
             let rm = NSMenuItem(title: "Remove Tunnel", action: nil, keyEquivalent: "")
             let sub = NSMenu()
             for t in tunnels {
@@ -278,17 +334,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             rm.submenu = sub
             menu.addItem(rm)
         }
-        menu.addItem(item("Open Config Folder", #selector(openFolder)))
+        menu.addItem(item("Open Config Directory", #selector(openFolder)))
         menu.addItem(item("Log Explorer…", #selector(showLog), key: "l"))
-        let dock = item("Show in Dock", #selector(toggleDock))
-        dock.state = Dock.visible ? .on : .off
-        menu.addItem(dock)
-        let notif = item("Notifications", #selector(toggleNotifications))
-        notif.state = Notify.enabled ? .on : .off
-        menu.addItem(notif)
-        let login = item("Launch at Login", #selector(toggleLogin))
-        login.state = SMAppService.mainApp.status == .enabled ? .on : .off
-        menu.addItem(login)
+        menu.addItem(.separator())
+        if !tunnels.isEmpty {
+            menu.addItem(submenu("Auto-connect", tunnels.map { t in
+                let mi = item(t.name, #selector(toggleAutoConnect(_:)))
+                mi.representedObject = t.name
+                mi.state = AutoConnect.tunnels.contains(t.name) ? .on : .off
+                return mi
+            }))
+        }
+        menu.addItem(settingsMenu())
+        if let u = availableUpdate {
+            menu.addItem(item("Update Available: v\(u.version)…", #selector(openUpdate)))
+        } else {
+            menu.addItem(item("Check for Updates…", #selector(checkForUpdatesManual)))
+        }
         menu.addItem(.separator())
         menu.addItem(item("Buy Me a Coffee…", #selector(openDonate)))
         menu.addItem(item("Quit", #selector(quit), key: "q"))
@@ -322,11 +384,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let allowed = tunnels.filter { ensureHooksApproved($0) }
         guard !allowed.isEmpty else { return }
         let verb = up ? "up" : "down"
+        if up { allowed.forEach { userDisconnected.remove($0.name) } } else { allowed.forEach { userDisconnected.insert($0.name) } }
         Log.info("wg-quick \(verb): \(allowed.map(\.name).joined(separator: ", "))")
         // "up" stops at the first failure; "down" keeps going so one bad tunnel doesn't strand others.
-        let cmd = allowed.map { "wg-quick \(verb) \(shellQuote($0.path))" }.joined(separator: up ? " && " : "; ")
+        // Passwordless for root-owned /etc/wireguard configs when the helper is installed.
+        let viaHelper = Helper.isInstalled ? allowed.filter { $0.path.hasPrefix(Helper.configDir + "/") } : []
+        let viaAdmin = allowed.filter { t in !viaHelper.contains { $0.path == t.path } }
+        let cmd = viaAdmin.map { "wg-quick \(verb) \(shellQuote($0.path))" }.joined(separator: up ? " && " : "; ")
         let names = allowed.map(\.name).joined(separator: ", ")
-        run(cmd, what: "wg-quick \(verb)", status: "\(up ? "Connecting" : "Disconnecting") \(names)…")
+        runTask(what: "wg-quick \(verb)", status: "\(up ? "Connecting" : "Disconnecting") \(names)…", needsPrompt: !viaAdmin.isEmpty) {
+            var out = ""
+            for t in viaHelper {
+                do { out += try Helper.run([verb, t.name]) } catch {
+                    if up { throw error }
+                    out += "\(t.name): \(error.localizedDescription)\n"
+                }
+            }
+            if !cmd.isEmpty { out += try runAsAdmin(cmd) }
+            return out
+        }
     }
 
     /// Returns false if the config can't be read or the user rejects its hooks.
@@ -369,14 +445,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var blinkTimer: Timer?
 
     func run(_ command: String, what: String, status: String? = nil) {
+        runTask(what: what, status: status) { try runAsAdmin(command) }
+    }
+
+    /// `needsPrompt`: the work may show the admin password dialog. NSAppleScript can only present it
+    /// from the main thread (from a background thread it fails with "Authorization failed"), so that
+    /// work runs on main; the icon keeps pulsing via Core Animation. Helper (sudo -n) work runs in the background.
+    func runTask(what: String, status: String? = nil, needsPrompt: Bool = true, _ work: @escaping () throws -> String) {
         guard busy == nil else { Log.warn("\(what) ignored: busy with \(busy!)"); return }
         busy = status ?? "Working…"
         startBlink()
-        adminQueue.async {
+        CATransaction.flush()   // commit the pulse animation before main may block on the dialog
+        let queue = needsPrompt ? DispatchQueue.main : adminQueue
+        queue.async {
             var failure: String?
             var cancelled = false
             do {
-                let out = try runAsAdmin(command)
+                let out = try work()
                 Log.info("\(what) ok\n\(out.trimmingCharacters(in: .whitespacesAndNewlines))")
             } catch let e as NSError where e.code == -128 {
                 cancelled = true
@@ -409,17 +494,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 .withSymbolConfiguration(.init(pointSize: 14, weight: .medium))
             img?.isTemplate = true
             button.image = img
-            NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.3
-                button.animator().alphaValue = phase % 2 == 0 ? 1.0 : 0.45
-            }
         }
         RunLoop.main.add(blinkTimer!, forMode: .common)   // keep animating while the menu is open
+        if let button = statusItem.button {
+            button.wantsLayer = true
+            let pulse = CABasicAnimation(keyPath: "opacity")
+            pulse.fromValue = 1.0
+            pulse.toValue = 0.3
+            pulse.duration = 0.55
+            pulse.autoreverses = true
+            pulse.repeatCount = .infinity
+            button.layer?.add(pulse, forKey: "pulse")
+        }
     }
 
     func stopBlink() {
         blinkTimer?.invalidate()
         blinkTimer = nil
+        statusItem.button?.layer?.removeAnimation(forKey: "pulse")
         statusItem.button?.alphaValue = 1
     }
 
@@ -482,7 +574,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         addTunnel(suggestedName: nameField.stringValue, contents: tv.string)
     }
 
-    func addTunnel(suggestedName: String, contents: String) {
+    func addTunnel(suggestedName: String, contents original: String, editing: Bool = false) {
+        var contents = original
         guard contents.contains("[Interface]"), contents.contains("[Peer]"),
               !confValues(contents, key: "privatekey").isEmpty else {
             Log.warn("add: '\(suggestedName)' rejected — not a WireGuard client config")
@@ -495,7 +588,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             name = n
         }
         let existing = listTunnels().filter { $0.name != name }
-        if let t = listTunnels().first(where: { $0.name == name }), !confirm("Replace existing \(name)?\n\(t.path)") { return }
+        if !editing, let t = listTunnels().first(where: { $0.name == name }), !confirm("Replace existing \(name)?\n\(t.path)") { return }
+
+        // Global DNS breaks other tunnels and normal internet DNS: offer split DNS instead.
+        let hadHooks = !hookLines(contents).isEmpty
+        var generatedHooks = false
+        if let plan = SplitDNS.plan(contents) {
+            switch askSplitDNS(name: name, plan: plan) {
+            case .convert:
+                contents = SplitDNS.convert(contents, plan: plan)
+                generatedHooks = !plan.domains.isEmpty && !plan.servers.isEmpty
+                Log.info("add: \(name) converted to split DNS for \(plan.domains.joined(separator: ", "))")
+            case .keep: break
+            case .cancel: return
+            }
+        }
 
         // Routes that would clash with other tunnels, or capture all traffic.
         let newRoutes = allowedIPs(contents)
@@ -505,9 +612,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             for a in newRoutes { for b in allowedIPs(other) where cidrOverlap(a, b) { clashes.append("\(a) ↔ \(t.name): \(b)") } }
         }
         if newRoutes.contains("0.0.0.0/0") { clashes.append("0.0.0.0/0 sends ALL traffic through \(name)") }
-        if !confValues(contents, key: "dns").isEmpty {
-            clashes.append("DNS = … replaces your system DNS for ALL lookups while \(name) is up")
-        }
         if !clashes.isEmpty {
             Log.warn("add: \(name) warnings: \(clashes.joined(separator: " | "))")
             if !confirm("\(name) may disturb other tunnels or your internet:\n\n"
@@ -518,7 +622,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let data = Data(contents.utf8)
         let hooks = hookLines(contents)
         if !hooks.isEmpty {
-            guard approveHooks(name: name, hooks: hooks) else { Log.warn("add: \(name) hooks rejected"); return }
+            // Hooks we just generated from the DNS line were already shown in the split-DNS dialog.
+            if !(generatedHooks && !hadHooks) {
+                guard approveHooks(name: name, hooks: hooks) else { Log.warn("add: \(name) hooks rejected"); return }
+            }
             HookApproval.approve(data)
         }
 
@@ -698,6 +805,331 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    // MARK: Stats, health, auto-connect, updates, profiles, QR, edit
+
+    func tunnelTitle(_ t: Tunnel) -> NSAttributedString {
+        let s = NSMutableAttributedString(string: t.name, attributes: [.font: NSFont.menuFont(ofSize: 0)])
+        guard t.isUp, let st = stats[t.name] else { return s }
+        var parts: [String] = []
+        if st.stuck { parts.append("⚠︎ stuck: no replies") }
+        if let h = st.handshake { parts.append("handshake \(formatAgo(h))") }
+        if st.iface != nil { parts.append("↓\(formatBytes(st.rx)) ↑\(formatBytes(st.tx))") }
+        if let a = st.address { parts.append(a) }
+        guard !parts.isEmpty else { return s }
+        s.append(NSAttributedString(string: "\n" + parts.joined(separator: " · "), attributes: [
+            .font: NSFont.menuFont(ofSize: NSFont.smallSystemFontSize),
+            .foregroundColor: st.stuck ? NSColor.systemOrange : NSColor.secondaryLabelColor,
+        ]))
+        return s
+    }
+
+    func sampleStats() {
+        let tunnels = listTunnels()
+        statsQueue.async { [weak self] in
+            guard let self else { return }
+            let r = self.health.sample(tunnels: tunnels)
+            DispatchQueue.main.async {
+                self.stats = r.stats
+                for name in r.newlyStuck { self.handleStuck(name) }
+                self.refreshIcon()
+            }
+        }
+    }
+
+    func handleStuck(_ name: String) {
+        Log.warn("\(name) looks stuck: traffic goes out but nothing comes back")
+        Notify.error("\(name) looks stuck", AutoConnect.restartStuck
+            ? "Traffic goes out but nothing comes back. Restarting it…"
+            : "Traffic goes out but nothing comes back. Is the same config active on another device?")
+        guard AutoConnect.restartStuck, let t = listTunnels().first(where: { $0.name == name }), ensureHooksApproved(t) else { return }
+        restart(t)
+    }
+
+    func restart(_ t: Tunnel) {
+        let viaHelper = Helper.isInstalled && t.path.hasPrefix(Helper.configDir + "/")
+        runTask(what: "restart \(t.name)", status: "Restarting \(t.name)…", needsPrompt: !viaHelper) {
+            if viaHelper {
+                _ = try? Helper.run(["down", t.name])
+                return try Helper.run(["up", t.name])
+            }
+            return try runAsAdmin("wg-quick down \(shellQuote(t.path)); wg-quick up \(shellQuote(t.path))")
+        }
+    }
+
+    @objc func copyIP(_ sender: NSMenuItem) {
+        guard let a = sender.representedObject as? String else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(a, forType: .string)
+    }
+
+    /// Auto-connect at launch; after wake and network changes too when passwordless (no surprise prompts).
+    func setupAutoConnect() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.autoConnect(reason: "launch") }
+        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { self?.autoConnect(reason: "wake") }
+        }
+        let monitor = NWPathMonitor()
+        var wasSatisfied = true
+        monitor.pathUpdateHandler = { [weak self] path in
+            let ok = path.status == .satisfied
+            if ok && !wasSatisfied { DispatchQueue.main.asyncAfter(deadline: .now() + 3) { self?.autoConnect(reason: "network change") } }
+            wasSatisfied = ok
+        }
+        monitor.start(queue: DispatchQueue(label: "wgtoggle.path"))
+        pathMonitor = monitor
+    }
+
+    func autoConnect(reason: String) {
+        if reason != "launch" && !Helper.isInstalled { return }
+        let want = listTunnels().filter { AutoConnect.tunnels.contains($0.name) && !$0.isUp }
+        guard !want.isEmpty, busy == nil else { return }
+        Log.info("auto-connect (\(reason)): \(want.map(\.name).joined(separator: ", "))")
+        setState(want, up: true)
+    }
+
+    @objc func toggleAutoConnect(_ sender: NSMenuItem) {
+        guard let n = sender.representedObject as? String else { return }
+        if AutoConnect.tunnels.contains(n) { AutoConnect.tunnels.remove(n) } else { AutoConnect.tunnels.insert(n) }
+        Log.info("auto-connect \(n): \(AutoConnect.tunnels.contains(n))")
+    }
+
+    func toggleAllShortcut() {
+        let t = listTunnels()
+        if t.contains(where: { $0.isUp }) { allDown() } else { allUp() }
+    }
+
+    func submenu(_ title: String, _ items: [NSMenuItem]) -> NSMenuItem {
+        let mi = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        let sub = NSMenu()
+        items.forEach { sub.addItem($0) }
+        mi.submenu = sub
+        return mi
+    }
+
+    func settingsMenu() -> NSMenuItem {
+        func toggle(_ title: String, _ on: Bool, _ sel: Selector) -> NSMenuItem {
+            let mi = item(title, sel); mi.state = on ? .on : .off; return mi
+        }
+        return submenu("Settings", [
+            toggle("Passwordless Mode", Helper.isInstalled, #selector(togglePasswordless)),
+            toggle("Restart Stuck Tunnels Automatically", AutoConnect.restartStuck, #selector(toggleAutoRestart)),
+            .separator(),
+            toggle("Global Shortcut \(HotKey.label) (Toggle All)", HotKey.enabled, #selector(toggleHotKey)),
+            toggle("Notifications", Notify.enabled, #selector(toggleNotifications)),
+            toggle("Show in Dock", Dock.visible, #selector(toggleDock)),
+            toggle("Launch at Login", SMAppService.mainApp.status == .enabled, #selector(toggleLogin)),
+            toggle("Check for Updates Automatically", Updates.auto, #selector(toggleUpdates)),
+        ])
+    }
+
+    @objc func toggleAutoRestart() { AutoConnect.restartStuck.toggle(); Log.info("auto-restart stuck: \(AutoConnect.restartStuck)") }
+    @objc func toggleHotKey() { HotKey.enabled.toggle(); HotKey.apply(); Log.info("global shortcut: \(HotKey.enabled)") }
+    @objc func toggleUpdates() { Updates.auto.toggle(); Log.info("auto update check: \(Updates.auto)") }
+
+    @objc func togglePasswordless() {
+        if Helper.isInstalled {
+            guard confirm("Turn off passwordless mode?\n\nConfigs stay in \(Helper.configDir). Connecting will ask for your password again.",
+                          button: "Turn Off") else { return }
+            runTask(what: "uninstall helper", status: "Removing helper…") { try Helper.uninstall(); return "removed" }
+            return
+        }
+        let movable = listTunnels().filter { !$0.path.hasPrefix(Helper.configDir + "/") }
+        // Every config moved into the root-owned dir must have approved hooks first.
+        guard movable.allSatisfy({ ensureHooksApproved($0) }) else { return }
+        let a = NSAlert()
+        a.messageText = "Turn on passwordless mode?"
+        a.informativeText = """
+            Connecting and disconnecting will no longer ask for your password.
+
+            One admin prompt now will:
+            • copy wg-quick, wg, wireguard-go and bash into \(Helper.dir) (root-owned)
+            • allow only that helper in \(Helper.sudoers)
+            • move your configs into \(Helper.configDir) (root-owned, so nothing running as you can change them)
+
+            Adding, editing or removing tunnels will still ask for your password.
+            Re-run this after `brew upgrade wireguard-tools` to pick up new versions.
+            """
+        a.addButton(withTitle: "Turn On")
+        a.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+        Log.info("installing helper; moving: \(movable.map(\.name).joined(separator: ", "))")
+        runTask(what: "install helper", status: "Installing helper…") { try Helper.install(movingConfigs: movable) }
+    }
+
+    @objc func checkForUpdatesManual() { checkForUpdates(manual: true) }
+
+    func checkForUpdates(manual: Bool) {
+        guard manual || Updates.auto else { return }
+        Updates.check { rel, err in
+            DispatchQueue.main.async {
+                if let rel {
+                    let isNew = self.availableUpdate?.version != rel.version
+                    self.availableUpdate = rel
+                    Log.info("update available: v\(rel.version)")
+                    if isNew || manual { Notify.post(title: "WGToggle \(rel.version) is available", body: "Open the menu to download it.") }
+                    if manual { NSWorkspace.shared.open(rel.url) }
+                } else if manual {
+                    if let err { self.alert("Couldn't check for updates", err) }
+                    else { self.alert("You're up to date", "WGToggle \(Updates.current) is the latest version.") }
+                }
+            }
+        }
+    }
+
+    @objc func openUpdate() { if let u = availableUpdate { NSWorkspace.shared.open(u.url) } }
+
+    func profilesMenu(_ tunnels: [Tunnel]) -> NSMenuItem {
+        let profiles = Profiles.all
+        let upNames = Set(tunnels.filter { $0.isUp }.map(\.name))
+        var items: [NSMenuItem] = profiles.keys.sorted().map { name in
+            let members = profiles[name] ?? []
+            let mi = item("\(name)  (\(members.joined(separator: ", ")))", #selector(activateProfile(_:)))
+            mi.representedObject = name
+            mi.state = Set(members) == upNames && !upNames.isEmpty ? .on : .off
+            return mi
+        }
+        if !items.isEmpty { items.append(.separator()) }
+        items.append(item("Save Current as Profile…", #selector(saveProfile)))
+        if !profiles.isEmpty {
+            items.append(submenu("Delete Profile", profiles.keys.sorted().map { n in
+                let mi = item(n, #selector(deleteProfile(_:))); mi.representedObject = n; return mi
+            }))
+        }
+        return submenu("Profiles", items)
+    }
+
+    @objc func activateProfile(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String, let members = Profiles.all[name] else { return }
+        let tunnels = listTunnels()
+        let down = tunnels.filter { $0.isUp && !members.contains($0.name) }
+        let up = tunnels.filter { !$0.isUp && members.contains($0.name) }
+        Log.info("profile \(name): up \(up.map(\.name)), down \(down.map(\.name))")
+        if !down.isEmpty { setState(down, up: false) }
+        if !up.isEmpty {
+            // setState is one-at-a-time; queue the "up" half after the "down" half finishes.
+            func go() { if busy == nil { setState(up, up: true) } else { DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { go() } } }
+            go()
+        }
+    }
+
+    @objc func saveProfile() {
+        let upNames = listTunnels().filter { $0.isUp }.map(\.name)
+        guard !upNames.isEmpty else { alert("No tunnels are up", "Connect the tunnels you want in the profile first."); return }
+        let a = NSAlert()
+        a.messageText = "Save profile"
+        a.informativeText = "Tunnels: \(upNames.joined(separator: ", "))"
+        let f = NSTextField(frame: NSRect(x: 0, y: 0, width: 220, height: 24))
+        f.placeholderString = "e.g. Work"
+        a.accessoryView = f
+        a.addButton(withTitle: "Save"); a.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        a.window.initialFirstResponder = f
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+        let name = f.stringValue.trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty else { return }
+        Profiles.all[name] = upNames
+        Log.info("profile saved: \(name) = \(upNames)")
+    }
+
+    @objc func deleteProfile(_ sender: NSMenuItem) {
+        guard let n = sender.representedObject as? String else { return }
+        Profiles.all[n] = nil
+        Log.info("profile deleted: \(n)")
+    }
+
+    @objc func importQR() {
+        var image = NSImage(pasteboard: NSPasteboard.general)
+        if image == nil {
+            let panel = NSOpenPanel()
+            panel.allowedContentTypes = [.image]
+            panel.message = "Choose a screenshot or image of the WireGuard QR code"
+            NSApp.activate(ignoringOtherApps: true)
+            guard panel.runModal() == .OK, let url = panel.url else { return }
+            image = NSImage(contentsOf: url)
+        }
+        guard let image, let text = QRImport.decode(image) else {
+            alert("No QR code found", "Copy a screenshot of the QR code to the clipboard, or choose an image file.")
+            return
+        }
+        Log.info("import: QR code decoded (\(text.count) chars)")
+        addTunnel(suggestedName: "", contents: text)
+    }
+
+    @objc func editTunnel(_ sender: NSMenuItem) {
+        guard let path = sender.representedObject as? String,
+              let t = listTunnels().first(where: { $0.path == path }) else { return }
+        var text = try? String(contentsOfFile: path, encoding: .utf8)
+        if text == nil {   // root-only config: read it with one admin prompt
+            text = try? runAsAdmin("cat \(shellQuote(path))")
+        }
+        guard let text else { return }
+        guard let (name, newText) = configDialog(title: "Edit \(t.name)", name: t.name, text: text, nameEditable: false),
+              newText != text else { return }
+        Log.info("edit: \(t.name)")
+        addTunnel(suggestedName: name, contents: newText, editing: true)
+    }
+
+    enum SplitChoice { case convert, keep, cancel }
+
+    func askSplitDNS(name: String, plan: SplitDNS.Plan) -> SplitChoice {
+        let a = NSAlert()
+        a.alertStyle = .warning
+        a.messageText = "\(name) sets DNS for all lookups"
+        if !plan.domains.isEmpty && !plan.servers.isEmpty {
+            a.informativeText = """
+                While \(name) is up, every DNS lookup would go to \(plan.servers.joined(separator: ", ")). This breaks other tunnels and can slow down normal internet.
+
+                Use split DNS instead? Only these domains will use the VPN's DNS:
+                \(plan.domains.map { "• *.\($0)" }.joined(separator: "\n"))
+
+                (The DNS line is replaced with PostUp/PostDown hooks that manage /etc/resolver/<domain>.)
+                """
+            a.addButton(withTitle: "Use Split DNS")
+        } else {
+            a.informativeText = "While \(name) is up, every DNS lookup goes to the VPN. The config doesn't name a domain, so split DNS can't be set up automatically.\n\nRemove the DNS line and keep using your normal DNS?"
+            a.addButton(withTitle: "Remove DNS Line")
+        }
+        a.addButton(withTitle: "Keep As Is")
+        a.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        switch a.runModal() {
+        case .alertFirstButtonReturn: return .convert
+        case .alertSecondButtonReturn: return .keep
+        default: return .cancel
+        }
+    }
+
+    /// Shared editor for paste and edit.
+    func configDialog(title: String, name: String, text: String, nameEditable: Bool = true) -> (String, String)? {
+        let a = NSAlert()
+        a.messageText = title
+        a.informativeText = nameEditable ? "Name (max 15 chars) and the config contents:" : "Overlaps, DNS and hooks are checked when you save."
+        let box = NSView(frame: NSRect(x: 0, y: 0, width: 460, height: 300))
+        let nameField = NSTextField(frame: NSRect(x: 0, y: 274, width: 460, height: 24))
+        nameField.placeholderString = "e.g. wg-staging"
+        nameField.stringValue = name
+        nameField.isEditable = nameEditable
+        let scroll = NSTextView.scrollableTextView()
+        scroll.frame = NSRect(x: 0, y: 0, width: 460, height: 266)
+        scroll.borderType = .bezelBorder
+        let tv = scroll.documentView as! NSTextView
+        tv.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        tv.isAutomaticQuoteSubstitutionEnabled = false
+        tv.isAutomaticDashSubstitutionEnabled = false
+        tv.isAutomaticTextReplacementEnabled = false
+        tv.string = text
+        box.addSubview(nameField)
+        box.addSubview(scroll)
+        a.accessoryView = box
+        a.addButton(withTitle: "Save")
+        a.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        a.window.initialFirstResponder = nameEditable ? nameField : tv
+        guard a.runModal() == .alertFirstButtonReturn else { return nil }
+        return (nameField.stringValue, tv.string)
+    }
+
     @objc func openDonate() { NSWorkspace.shared.open(URL(string: "https://buymeacoffee.com/ppodolak")!) }
     @objc func openBrew() { NSWorkspace.shared.open(URL(string: "https://brew.sh")!) }
     @objc func quit() { NSApp.terminate(nil) }
@@ -731,6 +1163,23 @@ enum Dock {
         NSApp.setActivationPolicy(visible ? .regular : .accessory)
         if visible { NSApp.activate(ignoringOtherApps: true) }
     }
+}
+
+// `WGToggle --diagnose`: print tunnel status, traffic and health, then exit (no keys printed).
+if CommandLine.arguments.contains("--diagnose") {
+    let m = HealthMonitor()
+    let tunnels = listTunnels()
+    print("WGToggle \(Updates.current)  passwordless: \(Helper.isInstalled ? "on" : "off")  config dir: \(preferredConfigDir)")
+    _ = m.sample(tunnels: tunnels)
+    Thread.sleep(forTimeInterval: 2)
+    let r = m.sample(tunnels: tunnels)
+    for t in tunnels {
+        let s = r.stats[t.name]
+        let hs = s?.handshake.map { formatAgo($0) } ?? "-"
+        print("\(t.name.padding(toLength: 16, withPad: " ", startingAt: 0)) \(t.isUp ? "UP  " : "down") iface=\(s?.iface ?? "-") ip=\(s?.address ?? "-") rx=\(formatBytes(s?.rx ?? 0)) tx=\(formatBytes(s?.tx ?? 0)) handshake=\(hs) stuck=\(s?.stuck ?? false)  \(t.path)")
+    }
+    if CommandLine.arguments.contains("--print-installer") { print(Helper.installer(user: NSUserName(), moveFrom: tunnels.map(\.path))) }
+    exit(0)
 }
 
 let app = NSApplication.shared
