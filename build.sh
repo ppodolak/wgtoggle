@@ -13,6 +13,13 @@ lipo -create build/WGToggle-arm64 build/WGToggle-x86_64 -output "$APP/Contents/M
 rm build/WGToggle-*
 
 cp Resources/Info.plist "$APP/Contents/"
+# CI passes APP_VERSION (from the git tag) and BUILD_NUMBER
+if [ -n "${APP_VERSION:-}" ]; then
+  plutil -replace CFBundleShortVersionString -string "$APP_VERSION" "$APP/Contents/Info.plist"
+fi
+if [ -n "${BUILD_NUMBER:-}" ]; then
+  plutil -replace CFBundleVersion -string "$BUILD_NUMBER" "$APP/Contents/Info.plist"
+fi
 
 # App icon rendered from an SF Symbol
 swift Resources/make-icon.swift build/AppIcon.iconset

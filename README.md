@@ -4,10 +4,13 @@
 
 A small native macOS menu bar app for running **several WireGuard tunnels at the same time** with `wg-quick`. Turn tunnels on one at a time or all together, and add new ones without opening a terminal.
 
-<p>
+<p align="center">
+  <a href="https://github.com/ppodolak/wgtoggle/actions/workflows/build.yml"><img alt="Build" src="https://github.com/ppodolak/wgtoggle/actions/workflows/build.yml/badge.svg"></a>
+  <a href="https://github.com/ppodolak/wgtoggle/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/ppodolak/wgtoggle?color=black"></a>
+  <a href="https://github.com/ppodolak/wgtoggle/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/ppodolak/wgtoggle/total?color=black"></a>
   <img alt="macOS 13+" src="https://img.shields.io/badge/macOS-13%2B-black">
   <img alt="Swift" src="https://img.shields.io/badge/Swift-6-black">
-  <img alt="Universal" src="https://img.shields.io/badge/arch-arm64%20%7C%20x86__64-black">
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/github/license/ppodolak/wgtoggle?color=black"></a>
 </p>
 
 ---
@@ -42,13 +45,15 @@ A small native macOS menu bar app for running **several WireGuard tunnels at the
 
 ## Install
 
-1. Open **`WGToggle.dmg`** and drag **WGToggle** into **Applications**.
+1. Download the latest **`WGToggle-x.y.z.dmg`** from [Releases](https://github.com/ppodolak/wgtoggle/releases/latest), open it then drag **WGToggle** into **Applications**.
 2. Launch it. A shield appears in the menu bar. The app has no Dock icon.
 3. *(Optional)* Turn on **Launch at Login** from the menu.
 
 > **Requirements:** macOS 13 or later and [Homebrew](https://brew.sh). `wireguard-tools` is installed automatically if it's missing.
 
-> **Gatekeeper:** the app is ad-hoc signed, not notarized. On a Mac other than the one that built it, right-click the app → **Open** the first time.
+> **Gatekeeper:** the app is ad-hoc signed, not notarized. The first time, right-click the app and choose **Open**, or run `xattr -dr com.apple.quarantine /Applications/WGToggle.app`.
+
+Each release includes a `.sha256` file you can use to check the download: `shasum -a 256 -c WGToggle-x.y.z.dmg.sha256`.
 
 ## Usage
 
@@ -173,6 +178,12 @@ A config is a secret (it holds your private key), and it's also code (wg-quick r
 git clone https://github.com/ppodolak/wgtoggle.git
 cd wgtoggle
 ./build.sh          # → build/WGToggle.app and build/WGToggle.dmg
+```
+
+CI (`.github/workflows/build.yml`) builds every push and pull request. Pushing a tag like `v1.3.0` builds with that version and publishes a GitHub Release with the DMG and its checksum:
+
+```bash
+git tag v1.3.0 && git push origin v1.3.0
 ```
 
 The build needs the Xcode Command Line Tools (`xcode-select --install`). It compiles separate arm64 and x86_64 binaries, merges them with `lipo`, draws the icon from an SF Symbol, ad-hoc signs the app, and packs the DMG.
