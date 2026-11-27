@@ -40,10 +40,11 @@ enum CLI {
             for t in listTunnels() { print("\(label(t.state))  \(t.name)") }
             return 0
         case "status":
-            let rc = status(json: rest.contains("--json"))
-            // --strict: monitoring use, exit 4 when any tunnel's state couldn't be determined
-            if rest.contains("--strict"), !snapshot().unknown.isEmpty { return 4 }
-            return rc
+            // --strict: monitoring use, exit 4 when any tunnel's state couldn't be determined.
+            // One snapshot feeds both the output and the exit code.
+            let tunnels = listTunnels().map { ($0, $0.state) }
+            _ = status(json: rest.contains("--json"), snapshot: tunnels)
+            return rest.contains("--strict") && tunnels.contains { $0.1 == .unknown } ? 4 : 0
         case "up", "down":
             guard !rest.isEmpty else { fputs("wgtoggle \(cmd): name a tunnel\n", stderr); return 2 }
             return setState(rest, up: cmd == "up")
@@ -122,13 +123,16 @@ enum CLI {
         }
     }
 
-    static func status(json: Bool) -> Int32 {
-        let tunnels = listTunnels()
+    static func status(json: Bool, snapshot: [(Tunnel, Tunnel.State)]? = nil) -> Int32 {
+        let snap = snapshot ?? listTunnels().map { ($0, $0.state) }
+        let tunnels = snap.map(\.0)
+        let stateOf = Dictionary(snap.map { ($0.0.name, $0.1) }, uniquingKeysWith: { a, _ in a })
         let stats = HealthMonitor().sample(tunnels: tunnels).stats
         if json {
             let items: [[String: Any]] = tunnels.map { t in
                 let s = stats[t.name]
-                var d: [String: Any] = ["name": t.name, "up": t.isUp, "state": "\(t.state)", "path": t.path,
+                let state = stateOf[t.name] ?? .unknown
+                var d: [String: Any] = ["name": t.name, "up": state == .up, "state": "\(state)", "path": t.path,
                                         "autoConnect": AutoConnect.tunnels.contains(t.name)]
                 if let s {
                     d["interface"] = s.iface ?? NSNull()
@@ -146,7 +150,7 @@ enum CLI {
             return printJSON(["tunnels": items])
         }
         for t in tunnels {
-            var line = "\(label(t.state))  \(t.name.padding(toLength: 16, withPad: " ", startingAt: 0))"
+            var line = "\(label(stateOf[t.name] ?? .unknown))  \(t.name.padding(toLength: 16, withPad: " ", startingAt: 0))"
             if let s = stats[t.name] {
                 line += " \(s.iface ?? "-")  \(s.address ?? "-")  ↓\(formatBytes(s.rx)) ↑\(formatBytes(s.tx))"
                 if let h = s.handshake { line += "  handshake \(formatAgo(h))" }
@@ -174,8 +178,10 @@ enum CLI {
             return 4
         }
         let target = Set(members), before = pre.up
-        _ = apply(before.subtracting(target).sorted(), up: false)
-        _ = apply(target.subtracting(before).sorted(), up: true)
+        // Stop at the first failed stage: connecting while an old tunnel is still up could clash.
+        if apply(before.subtracting(target).sorted(), up: false) == 0 {
+            _ = apply(target.subtracting(before).sorted(), up: true)
+        }
         let post = snapshot()
         if post.unknown.isEmpty && post.up == target { print("profile \(name) active"); return 0 }
         fputs("wgtoggle profile: switch to \(name) failed (up: \(post.up.sorted().joined(separator: ", "))\(post.unknown.isEmpty ? "" : ", unknown: \(post.unknown.joined(separator: ", "))")), restoring previous tunnels\n", stderr)

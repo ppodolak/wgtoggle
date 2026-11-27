@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 1.12.0 - 2026-11-27
+
+### Changed
+- Helper installation keeps a root-owned journal (`/var/db/wgtoggle-install.journal`). An install killed at any point, including a first install or during cleanup, is undone or finished correctly by the next run.
+- Passwordless helper v6: status output is verified (record count, no duplicates, nothing after the end marker, no orphan peers). Anything off means "unknown".
+- In passwordless mode the tunnel's real interface (from wg-quick's runtime file) decides its state; address matching is only used without the helper.
+- `wgtoggle status --strict` uses one snapshot for both the output and the exit code.
+- `wgtoggle profile` stops at the first failed stage and rolls back right away.
+
+### Fixed
+- Split-DNS markers written by 1.9/1.10 hooks (no tunnel name) were removed by `dns repair` even while their tunnel was running.
+
 ## 1.11.1 - 2026-11-27
 
 ### Added

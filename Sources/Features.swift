@@ -39,7 +39,8 @@ enum SplitDNS {
     /// name file for that tunnel must point at the same utun. utun names get reused after a reboot, so the
     /// socket alone could belong to a different VPN.
     static func aliveTest(_ W: String) -> String {
-        #"x="utun${m##*.if.utun}"; i="${x%%@*}"; n="${x#*@}"; [ "$x" != "$i" ] && [ -S "\#(W)/$i.sock" ] && [ "$(cat "\#(W)/$n.name" 2>/dev/null)" = "$i" ]"#
+        // Markers from 1.9/1.10 hooks have no "@tunnel" part: those only get the socket check.
+        #"{ x="utun${m##*.if.utun}"; i="${x%%@*}"; n="${x#*@}"; [ -S "\#(W)/$i.sock" ] && { [ "$x" = "$i" ] || [ "$(cat "\#(W)/$n.name" 2>/dev/null)" = "$i" ]; }; }"#
     }
 
     static func hooks(domain d: String, nameservers ns: String, resolverDir R: String = resolverDir,

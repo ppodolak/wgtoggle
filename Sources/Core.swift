@@ -108,6 +108,11 @@ struct Tunnel {
     var state: State {
         if demoMode { return Demo.up.contains(name) ? .up : .down }
         guard FileManager.default.fileExists(atPath: "\(runDir)/\(name).name") else { return .down }
+        // Passwordless mode: the helper reads wg-quick's runtime file, i.e. the tunnel's real interface.
+        if Helper.isInstalled {
+            guard let st = Helper.cachedStatus() else { return .unknown }
+            return st[name].map { interfaceTable()[$0.iface] != nil } == true ? .up : .down
+        }
         if let addr = tunnelAddress(path) {
             // Same address in another config whose runtime file also exists: ambiguous unless the helper can tell.
             let twins = listTunnels().filter { $0.name != name && tunnelAddress($0.path) == addr

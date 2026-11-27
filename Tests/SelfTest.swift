@@ -75,6 +75,11 @@ garbage line
 check(Helper.parseStatus("a utun1 0 1 2\nend 1\n", strict: true)?["a"] != nil, "strict status with end marker parses")
 check(Helper.parseStatus("a utun1 0 1 2\n", strict: true) == nil, "strict status without end marker = unknown")
 check(Helper.parseStatus("a utun1 0 1 2\nGARBAGE here\nend 1\n", strict: true) == nil, "strict status with a garbled line = unknown")
+check(Helper.parseStatus("a utun1 0 1 2\nend 2\n", strict: true) == nil, "strict: record count must match")
+check(Helper.parseStatus("a utun1 0 1 2\na utun1 0 1 2\nend 2\n", strict: true) == nil, "strict: duplicate tunnel rejected")
+check(Helper.parseStatus("a utun1 0 1 2\nend 1\nb utun2 0 1 2\n", strict: true) == nil, "strict: nothing after end")
+check(Helper.parseStatus("peer zz K= 0 1 2\na utun1 0 1 2\nend 1\n", strict: true) == nil, "strict: peer of unlisted tunnel rejected")
+check(Helper.parseStatus("end 0\n", strict: true)?.isEmpty == true, "strict: no tunnels up is a valid answer")
 let st = st0!
 check(st["office"]?.iface == "utun7" && st["office"]?.peers.count == 2 && st["home"]?.peers.isEmpty == true, "status parser: tunnels and peers")
 check(st["office"]?.peers[1].handshake == nil && st["office"]?.peers[0].tx == 2500, "status parser: peer fields")
@@ -106,6 +111,7 @@ if findBinary("wg-quick") == nil {
         for (a, b) in [("/Library/PrivilegedHelperTools/wgtoggle", T + "/H"), ("/etc/sudoers.d/wgtoggle", T + "/sudoers"),
                        ("/etc/wireguard", T + "/etcwg"), ("mkdir -p /Library/PrivilegedHelperTools", "mkdir -p " + T),
                        ("chown -R root:wheel", ": chown"), ("chown root:wheel", ": chown"),
+                       ("/var/db/wgtoggle-install.journal", T + "/journal"),
                        ("install -o root -g wheel", "install")] { x = x.replacingOccurrences(of: a, with: b) }
         if breakCheck { x = x.replacingOccurrences(of: "== \(Helper.currentVersion) ]]", with: "== 999 ]]") }
         return x
@@ -131,18 +137,22 @@ if findBinary("wg-quick") == nil {
     check(ex("/H/previous") && !ex("/H.old"), "previous helper restored")
     check((try? String(contentsOfFile: T + "/sudoers", encoding: .utf8)) == "old rule", "previous sudo rule restored")
     check((try? String(contentsOfFile: T + "/etcwg/a.conf", encoding: .utf8))?.contains("OLD") == true && !ex("/etcwg/b.conf"), "overwritten config restored, new config removed")
-    // 4. an install was killed half-way (leftover .old / .wgtoggle-bak); the next attempt recovers first,
-    //    and if that attempt fails too, the original state is what comes back
-    try? fm.removeItem(atPath: T + "/H.old"); try! fm.moveItem(atPath: T + "/H", toPath: T + "/H.old")
-    try! fm.createDirectory(atPath: T + "/H", withIntermediateDirectories: true)   // half-installed junk
-    try! "old rule".write(toFile: T + "/sudoers.old", atomically: true, encoding: .utf8)
-    try! "junk rule".write(toFile: T + "/sudoers", atomically: true, encoding: .utf8)
-    try! fm.moveItem(atPath: T + "/etcwg/a.conf", toPath: T + "/etcwg/a.conf.wgtoggle-bak")
-    try! "junk".write(toFile: T + "/etcwg/a.conf", atomically: true, encoding: .utf8)
+    // 4. killed half-way (journal without "committed"): the next run undoes it first. If that run fails too,
+    //    the original state is what's left.
+    try? fm.removeItem(atPath: T + "/H.wgtoggle-bak"); try! fm.moveItem(atPath: T + "/H", toPath: T + "/H.wgtoggle-bak")
+    try! fm.createDirectory(atPath: T + "/H", withIntermediateDirectories: true)                 // half-installed
+    try! "junk".write(toFile: T + "/etcwg/new.conf", atomically: true, encoding: .utf8)          // created before the kill
+    try! "backup \(T)/H\nnew \(T)/etcwg/new.conf\n".write(toFile: T + "/journal", atomically: true, encoding: .utf8)
     check(run(script(breakCheck: true)) != 0, "install after an interrupted one fails as injected")
-    check(ex("/H/previous") && !ex("/H.old") && (try? String(contentsOfFile: T + "/sudoers", encoding: .utf8)) == "old rule"
-          && (try? String(contentsOfFile: T + "/etcwg/a.conf", encoding: .utf8))?.contains("OLD") == true && !ex("/etcwg/a.conf.wgtoggle-bak"),
+    check(ex("/H/previous") && !ex("/H.wgtoggle-bak") && !ex("/etcwg/new.conf") && !ex("/journal")
+          && (try? String(contentsOfFile: T + "/sudoers", encoding: .utf8)) == "old rule"
+          && (try? String(contentsOfFile: T + "/etcwg/a.conf", encoding: .utf8))?.contains("OLD") == true,
           "interrupted install recovered to the original state")
+    // 5. killed during cleanup after "committed": the next run keeps the installed state, only drops backups
+    try! fm.copyItem(atPath: T + "/H", toPath: T + "/H.wgtoggle-bak")
+    try! "backup \(T)/H\ncommitted\n".write(toFile: T + "/journal", atomically: true, encoding: .utf8)
+    _ = run(script(breakCheck: true))   // its own (injected) failure only undoes its own changes
+    check(ex("/H/previous") && !ex("/H.wgtoggle-bak") && !ex("/journal"), "committed install isn't rolled back by the next run")
     check(run(script()) == 0 && ex("/H/wgtoggle-helper") && !ex("/H/previous"), "next install then succeeds")
     try? fm.removeItem(atPath: T)
 }
@@ -216,6 +226,10 @@ do {
     check(content() == "nameserver 192.0.2.1\n", "pre-existing resolver file restored afterwards")
     // crash/reboot: resolver of a tunnel that's no longer running gets cleaned up by repair
     up(dev, "utun10"); sock("utun10", alive: false)   // utun10 dies without running PostDown
+    // 1.9/1.10 markers have no "@tunnel": a running tunnel's legacy marker must survive repair
+    try! fm.createDirectory(atPath: M, withIntermediateDirectories: true)
+    try! "nameserver 10.30.0.53\\n".write(toFile: "\(M)/legacy.if.utun12", atomically: true, encoding: .utf8)
+    names["utun12"] = "old"; sock("utun12", alive: true)
     func repair() { let p = Process(); p.executableURL = URL(fileURLWithPath: "/bin/bash")
         p.arguments = ["-c", SplitDNS.repairScript(resolverDir: R, markerDir: M, runDir: W)]
         p.standardOutput = FileHandle.nullDevice; try! p.run(); p.waitUntilExit() }
@@ -225,6 +239,10 @@ do {
     repair()
     check(content().contains("10.10.0.53"), "repair: resolver rebuilt from the tunnel still running")
     down(dev, "utun10")
+    repair()
+    check(fm.fileExists(atPath: "\(M)/legacy.if.utun12") && fm.fileExists(atPath: R + "/legacy"), "legacy marker of a running tunnel survives repair")
+    sock("utun12", alive: false); repair()
+    check(!fm.fileExists(atPath: "\(M)/legacy.if.utun12") && !fm.fileExists(atPath: R + "/legacy"), "legacy marker cleaned once its tunnel is gone")
     repair(); let once = content(); repair()
     check(content() == once, "repair twice changes nothing")
 

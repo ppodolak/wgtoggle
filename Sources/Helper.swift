@@ -20,6 +20,7 @@ enum Helper {
     static let path = "\(dir)/wgtoggle-helper"
     static let sudoers = "/etc/sudoers.d/wgtoggle"
     static let configDir = "/etc/wireguard"
+    static let journal = "/var/db/wgtoggle-install.journal"
 
     static var isInstalled: Bool {
         let fm = FileManager.default
@@ -46,7 +47,7 @@ enum Helper {
       [[ $(( 0$(stat -f %Lp "$conf") & 022 )) == 0 ]] || { echo "$conf is group/world writable" >&2; exit 2; }
     }
     case "$cmd" in
-      version) echo 5 ;;
+      version) echo 6 ;;
       dns-repair)
         \#(SplitDNS.repairScript()) ;;
       up|down)
@@ -58,20 +59,21 @@ enum Helper {
         grep -iE '^[[:space:]]*(\[Interface\]|\[Peer\]|Address|AllowedIPs|DNS|PreUp|PostUp|PreDown|PostDown)[[:space:]]*(=|$)' "$conf" || true ;;
       status)
         # name iface latest-handshake rx tx   (no keys are printed)
+        emitted=0
         for f in /var/run/wireguard/*.name; do
           [[ -e "$f" ]] || continue
           n=$(basename "$f" .name); i=$(cat "$f")
           [[ -S "/var/run/wireguard/$i.sock" ]] || continue   # stale name file: wireguard-go is gone
           hs=$("$H/wg" show "$i" latest-handshakes 2>/dev/null | awk '{print $2}' | sort -n | tail -1)
           tr=$("$H/wg" show "$i" transfer 2>/dev/null | awk '{r+=$2; t+=$3} END {print r+0, t+0}')
-          echo "$n $i ${hs:-0} ${tr:-0 0}"
+          echo "$n $i ${hs:-0} ${tr:-0 0}"; emitted=$((emitted + 1))
           # one line per peer: peer NAME PUBLICKEY HANDSHAKE RX TX (public keys only; no `wg show dump`, it prints the private key)
           "$H/wg" show "$i" latest-handshakes 2>/dev/null | while read -r k t; do
             ptr=$("$H/wg" show "$i" transfer 2>/dev/null | awk -v k="$k" '$1 == k {print $2, $3}')
             echo "peer $n $k ${t:-0} ${ptr:-0 0}"
           done
         done
-        echo "end $(ls /var/run/wireguard/*.name 2>/dev/null | wc -l | tr -d ' ')" ;;   # completeness marker
+        echo "end $emitted" ;;   # completeness marker: number of tunnel lines above
       *) echo "usage: wgtoggle-helper up|down|meta NAME | status | dns-repair | version" >&2; exit 2 ;;
     esac
     """#
@@ -92,7 +94,7 @@ enum Helper {
             let dest = shellQuote("\(configDir)/\(name).conf")
             // record for rollback, copy, then verify byte for byte (set -e aborts and rolls back on mismatch)
             return """
-                if [[ -e \(dest) ]]; then cp -p \(dest) \(dest).wgtoggle-bak; OVERWRITTEN+=(\(dest)); else NEW_CONFS+=(\(dest)); fi
+                touchpath \(dest)
                 install -o root -g wheel -m 600 \(shellQuote(src)) \(dest)
                 cmp -s \(shellQuote(src)) \(dest)
                 """
@@ -103,30 +105,36 @@ enum Helper {
         H=\#(dir)
         NEW="$H.new.$$"
         S=\#(sudoers)
-        # Transaction: remember what existed, undo everything on ANY non-zero exit (set -e, failed command,
-        # explicit exit). Nothing is deleted until the final check passed.
-        COMMITTED=0; HAD_H=0; HAD_RULE=0; NEW_CONFS=(); OVERWRITTEN=()
-        # An earlier install was interrupted (power loss, kill): its leftovers mean it never committed. Undo it first.
-        if [[ -e "$H.old" ]]; then echo "recovering interrupted install" >&2; rm -rf "$H"; mv "$H.old" "$H"; fi
-        if [[ -e "$S.old" ]]; then mv "$S.old" "$S"; fi
-        for f in \#(configDir)/*.wgtoggle-bak; do [[ -e "$f" ]] && mv "$f" "${f%.wgtoggle-bak}"; done
-        rm -rf "$H".new.*
-        if [[ -e "$H" ]]; then HAD_H=1; fi
-        if [[ -e "$S" ]]; then HAD_RULE=1; cp -p "$S" "$S.old"; fi
-        rollback() {
-          set +e   # keep restoring the other parts even if one step fails
-          echo "install failed, rolling back" >&2
-          rm -rf "$NEW"
-          if [[ $HAD_H == 1 ]]; then
-            if [[ -e "$H.old" ]]; then rm -rf "$H"; mv "$H.old" "$H"; fi
-          else
-            rm -rf "$H"
-          fi
-          if [[ $HAD_RULE == 1 ]]; then mv "$S.old" "$S"; else rm -f "$S"; fi
-          for f in "${NEW_CONFS[@]+"${NEW_CONFS[@]}"}"; do rm -f "$f"; done
-          for f in "${OVERWRITTEN[@]+"${OVERWRITTEN[@]}"}"; do mv "$f.wgtoggle-bak" "$f"; done
+        # Transaction with a root-owned journal (survives kill/power loss). Every change is journaled BEFORE it's
+        # made; "committed" is journaled before cleanup. On the next run: no "committed" = undo everything in it,
+        # "committed" = just finish the cleanup.
+        J=\#(journal)
+        mkdir -p "$(dirname "$J")"
+        undo() {   # replay the journal backwards
+          set +e
+          tail -r "$J" 2>/dev/null | while IFS=' ' read -r op path; do
+            case "$op" in
+              new) rm -rf "$path" ;;                                   # created by us: remove
+              backup) if [[ -e "$path.wgtoggle-bak" ]]; then rm -rf "$path"; mv "$path.wgtoggle-bak" "$path"; fi ;;
+            esac
+          done
+          rm -f "$J"
         }
-        trap 'rc=$?; if [[ $rc -ne 0 && $COMMITTED == 0 ]]; then rollback; fi' EXIT
+        finish() {   # committed: drop the backups
+          set +e
+          while IFS=' ' read -r op path; do [[ "$op" == backup ]] && rm -rf "$path.wgtoggle-bak"; done < "$J"
+          rm -f "$J"
+        }
+        if [[ -e "$J" ]]; then
+          if grep -qx committed "$J"; then echo "finishing an earlier install" >&2; finish
+          else echo "recovering interrupted install" >&2; undo; fi
+        fi
+        rm -rf "$H".new.*
+        : > "$J"; chmod 600 "$J"
+        # Journal a path, then back it up (or note it as new). Call BEFORE changing the path.
+        touchpath() { if [[ -e "$1" ]]; then echo "backup $1" >> "$J"; rm -rf "$1.wgtoggle-bak"; cp -Rp "$1" "$1.wgtoggle-bak"; else echo "new $1" >> "$J"; fi; }
+        COMMITTED=0
+        trap 'rc=$?; if [[ $rc -ne 0 && $COMMITTED == 0 ]]; then echo "install failed, rolling back" >&2; undo; fi' EXIT
         BREW=""
         for p in /opt/homebrew /usr/local; do [[ -x "$p/bin/wg-quick" ]] && BREW="$p" && break; done
         [[ -n "$BREW" ]] || { echo "wg-quick not found" >&2; exit 1; }
@@ -161,15 +169,15 @@ enum Helper {
         HELPER
         chown -R root:wheel "$NEW"; chmod -R go-w "$NEW"; chmod 755 "$NEW" "$NEW"/wg-quick "$NEW"/wg "$NEW"/wireguard-go "$NEW"/bash "$NEW"/wgtoggle-helper
         mkdir -p /Library/PrivilegedHelperTools
-        rm -rf "$H.old"; if [[ -e "$H" ]]; then mv "$H" "$H.old"; fi; mv "$NEW" "$H"
+        touchpath "$H"; rm -rf "$H"; mv "$NEW" "$H"
+        touchpath "$S"
         \#(withRule ? sudoersAndConfigs(user: user, moves: moves) : "rm -f \(sudoers)")
         # post-install checks: tools run, helper answers
         # explicit exits: /bin/bash 3.2 does not apply set -e to a failing [[ ]]
         "$H/bash" -c 'exit 0' || { echo "installed bash does not run" >&2; exit 1; }
         [[ "$("$H/wgtoggle-helper" version)" == \#(currentVersion) ]] || { echo "installed helper does not answer" >&2; exit 1; }
-        COMMITTED=1
-        rm -rf "$H.old" "$S.old"
-        for f in "${OVERWRITTEN[@]+"${OVERWRITTEN[@]}"}"; do rm -f "$f.wgtoggle-bak"; done
+        echo committed >> "$J"; COMMITTED=1
+        finish
         echo "helper installed"
         """#
     }
@@ -210,7 +218,7 @@ enum Helper {
     }
 
     /// Bump when the helper script changes; older installs get an "update" prompt.
-    static let currentVersion = 5
+    static let currentVersion = 6
 
     private static var versionCache: Int?
 
@@ -279,7 +287,7 @@ enum Helper {
         guard isInstalled else { return nil }
         do {
             let out = try run(["status"])
-            guard let parsed = parseStatus(out, strict: installedVersion >= 5) else {
+            guard let parsed = parseStatus(out, strict: installedVersion >= 6) else {
                 if !lastFailed { Log.error("helper status incomplete, tunnel state unknown", detail: out); lastFailed = true }
                 return nil
             }
@@ -292,18 +300,23 @@ enum Helper {
     }
 
     /// `name iface hs rx tx` per tunnel, then `peer name key hs rx tx` per peer (helper v3+).
-    /// strict (helper v5+): every line must parse and the output must end with `end N`; else nil.
+    /// strict (helper v6+): every line parses, no duplicate tunnels, peers only for listed tunnels,
+    /// and the last line is `end N` with N = number of tunnel lines. Anything else: nil (state unknown).
     static func parseStatus(_ out: String, strict: Bool = false) -> [String: Status]? {
         var r: [String: Status] = [:]
         var sawEnd = false
         let date = { (t: TimeInterval) in t > 0 ? Date(timeIntervalSince1970: t) : nil }
         for line in out.split(separator: "\n") {
             let f = line.split(separator: " ").map(String.init)
+            if strict && sawEnd { return nil }   // nothing may follow the end marker
             if f.count == 5, let hs = TimeInterval(f[2]), let rx = UInt64(f[3]), let tx = UInt64(f[4]) {
+                if strict && r[f[0]] != nil { return nil }   // duplicate tunnel
                 r[f[0]] = Status(iface: f[1], handshake: date(hs), rx: rx, tx: tx, peers: r[f[0]]?.peers ?? [])
             } else if f.count == 6, f[0] == "peer", let hs = TimeInterval(f[3]), let rx = UInt64(f[4]), let tx = UInt64(f[5]) {
+                if strict && r[f[1]] == nil { return nil }   // peer of an unlisted tunnel
                 r[f[1]]?.peers.append(Peer(key: f[2], handshake: date(hs), rx: rx, tx: tx))
-            } else if f.count == 2, f[0] == "end", Int(f[1]) != nil {
+            } else if f.count == 2, f[0] == "end", let n = Int(f[1]) {
+                if strict && n != r.count { return nil }      // records missing or extra
                 sawEnd = true
             } else if strict {
                 return nil   // garbled line
