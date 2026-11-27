@@ -25,8 +25,10 @@ enum SplitDNS {
 
     /// Removes DNS lines; when domains are known, adds resolver hooks right after [Interface].
     static let resolverDir = "/etc/resolver"
-    /// Per (domain, interface) marker holding that tunnel's nameservers; /var/run is cleared at boot.
-    static let markerDir = "/var/run/wgtoggle-dns"
+    /// Per (domain, interface) marker holding that tunnel's nameservers, plus the saved original resolver.
+    /// Persistent (not /var/run): after a reboot, leftover markers show the resolver is ours, so it's never
+    /// mistaken for a foreign file, and the saved original isn't lost. Dead markers are pruned on disconnect.
+    static let markerDir = "/var/db/wgtoggle-dns"
 
     /// Hook lines for one domain. Several tunnels can share a domain, even with different nameservers:
     /// each running tunnel keeps its own resolver content in a marker. On disconnect the resolver is rebuilt

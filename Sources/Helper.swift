@@ -86,13 +86,22 @@ enum Helper {
     static func installer(user: String, moveFrom: [String], sudoers withRule: Bool = true) -> String {
         let moves = moveFrom.map { src -> String in
             let name = ((src as NSString).lastPathComponent as NSString).deletingPathExtension
-            return "install -o root -g wheel -m 600 \(shellQuote(src)) \(shellQuote("\(configDir)/\(name).conf"))"
+            let dest = shellQuote("\(configDir)/\(name).conf")
+            return "install -o root -g wheel -m 600 \(shellQuote(src)) \(dest) && cmp -s \(shellQuote(src)) \(dest)"
         }.joined(separator: "\n")
         return #"""
         #!/bin/bash
         set -euo pipefail
         H=\#(dir)
         NEW="$H.new.$$"
+        # Roll back to the previous install (helper, tools and sudo rule) if any later step fails.
+        rollback() {
+          echo "install failed, rolling back" >&2
+          rm -rf "$NEW"
+          if [[ -e "$H.old" ]]; then rm -rf "$H"; mv "$H.old" "$H"; fi
+          if [[ -e "\#(sudoers).old" ]]; then mv "\#(sudoers).old" \#(sudoers); fi
+        }
+        trap rollback ERR
         BREW=""
         for p in /opt/homebrew /usr/local; do [[ -x "$p/bin/wg-quick" ]] && BREW="$p" && break; done
         [[ -n "$BREW" ]] || { echo "wg-quick not found" >&2; exit 1; }
@@ -127,8 +136,12 @@ enum Helper {
         HELPER
         chown -R root:wheel "$NEW"; chmod -R go-w "$NEW"; chmod 755 "$NEW" "$NEW"/wg-quick "$NEW"/wg "$NEW"/wireguard-go "$NEW"/bash "$NEW"/wgtoggle-helper
         mkdir -p /Library/PrivilegedHelperTools
-        rm -rf "$H.old"; [[ -e "$H" ]] && mv "$H" "$H.old"; mv "$NEW" "$H"; rm -rf "$H.old"
+        rm -rf "$H.old"; if [[ -e "$H" ]]; then mv "$H" "$H.old"; fi; mv "$NEW" "$H"
+        if [[ -e \#(sudoers) ]]; then cp -p \#(sudoers) "\#(sudoers).old"; fi
         \#(withRule ? sudoersAndConfigs(user: user, moves: moves) : "rm -f \(sudoers)")
+        "$H/bash" -c 'exit 0'                                  # post-install check
+        trap - ERR
+        rm -rf "$H.old" "\#(sudoers).old"
         echo "helper installed"
         """#
     }

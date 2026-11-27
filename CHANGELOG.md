@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## 1.9.0 - 2026-11-27
+
+### Added
+- Keys are redacted from logs (file, unified log, Log Explorer exports).
+- Helper installer rolls back to the previous helper and sudo rule if any step fails, and checks every migrated config byte for byte.
+- `wgtoggle profile` reports whether the rollback worked (exit `1` restored, `3` rollback failed).
+
+### Changed
+- Split-DNS state moved to `/var/db/wgtoggle-dns` so it survives reboots. Configs converted by earlier versions keep working.
+- A peer is flagged as soon as anything is sent to it without a fresh handshake (unreachable peers only send small handshake attempts).
+- `wgtoggle routes` says it shows configured AllowedIPs.
+
+### Fixed
+- `wgtoggle down` skipped tunnels whose state was unknown.
+- Peer monitoring kept data for tunnels that were down and peers that were removed.
+- Routing-message parsing reads unaligned data safely and stops on malformed lengths.
+
 ## 1.8.0 - 2026-11-27
 
 ### Added

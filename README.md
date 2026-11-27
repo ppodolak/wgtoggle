@@ -163,7 +163,7 @@ Several tunnels work side by side when they meet these conditions:
 
    With this, only `*.corp` names go to the VPN's DNS. Everything else keeps using your normal DNS.
 
-   When WGToggle converts a config for you, the hooks it writes also handle **two tunnels sharing a domain**: each running tunnel keeps its own nameservers in a marker in `/var/run/wgtoggle-dns/`. When one disconnects, the resolver is rebuilt from the newest tunnel still running (so it never points at the DNS of a tunnel that's gone), and when the last one disconnects, a resolver file that existed before is put back, otherwise it's removed. Markers of crashed tunnels are ignored.
+   When WGToggle converts a config for you, the hooks it writes also handle **two tunnels sharing a domain**: each running tunnel keeps its own nameservers in a marker in `/var/db/wgtoggle-dns/` (kept across reboots, so a resolver left behind by a crash is never mistaken for someone else's file). When one disconnects, the resolver is rebuilt from the newest tunnel still running (so it never points at the DNS of a tunnel that's gone), and when the last one disconnects, a resolver file that existed before is put back, otherwise it's removed. Markers of crashed tunnels are ignored.
 
    > Use `ping`, `curl` or `dscacheutil -q host -a name host.corp` to test. `dig` and `nslookup` skip `/etc/resolver` and will wrongly say the name doesn't exist.
 
@@ -186,7 +186,7 @@ wgtoggle version               # app, wireguard-tools and helper versions
 wgtoggle diagnose              # status plus settings, no keys printed
 ```
 
-Exit codes: `0` ok, `1` failed or problems found (handy in scripts: `wgtoggle conflicts || exit 1`), `2` usage error, `4` incomplete (`conflicts` couldn't read some configs; it names them).
+Exit codes: `0` ok, `1` failed or problems found (handy in scripts: `wgtoggle conflicts || exit 1`), `2` usage error, `3` profile switch failed and restoring the previous tunnels also failed, `4` incomplete (`conflicts` couldn't read some configs; it names them).
 
 `wgtoggle profile NAME` switches under one lock, checks the result and, if the switch fails, restores the tunnels that were up before. JSON output (`status --json`, `routes --json`) has a `"version"` field that changes only if fields are removed or renamed.
 
@@ -255,6 +255,7 @@ A config is a secret (it holds your private key), and it's also code (wg-quick r
 
 - **The approved-hash list is stored in the app's user defaults**, which your user can edit. Malware already running as you could pre-approve its own hooks. Hook approval stops casual tampering and mistakes. It can't stop a determined attacker that already runs as your user, and nothing that relies on an admin prompt can.
 - **By default, the admin prompt runs Homebrew's `wg-quick`**, which your user can modify, so malware running as you could swap it and wait for your next password prompt. That's the same as typing `sudo wg-quick` yourself. **Settings → Use Root-Owned wg-quick** (or passwordless mode) removes this: the app and the CLI then use root-owned copies, also when they still ask for the password.
+- **Keys are stripped from logs**: `PrivateKey`/`PresharedKey` values become `<redacted>`, and any other WireGuard key is shortened to its first 4 characters.
 - **Command output is private in the system log** (it shows as `<private>` in Console) and only kept in full in `~/Library/Logs/WGToggle/wgtoggle.log`, which only you can read.
 - **The admin authorization is cached for a few minutes** after you type your password, as with any app that uses `do shell script … with administrator privileges`.
 - **Configs in `/etc/wireguard`** are root-owned and the app can't read them, so their hooks can't be shown. They're trusted because only root can write there.

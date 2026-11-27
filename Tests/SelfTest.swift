@@ -45,7 +45,7 @@ check(plan.servers == ["10.0.0.53", "10.0.0.54"] && plan.domains == ["corp", "la
 let converted = SplitDNS.convert(conf, plan: plan)
 check(confValues(converted, key: "dns").isEmpty, "DNS line removed")
 check(hookLines(converted).count == 8, "4 hook lines per domain")
-check(converted.contains("printf 'nameserver 10.0.0.53\\nnameserver 10.0.0.54\\n' > /var/run/wgtoggle-dns/corp.if.%i && cp /var/run/wgtoggle-dns/corp.if.%i /etc/resolver/corp"), "resolver hook content")
+check(converted.contains("printf 'nameserver 10.0.0.53\\nnameserver 10.0.0.54\\n' > /var/db/wgtoggle-dns/corp.if.%i && cp /var/db/wgtoggle-dns/corp.if.%i /etc/resolver/corp"), "resolver hook content")
 check(converted.contains("[Peer]") && converted.contains("MTU = 1380"), "rest of config kept")
 let ipOnly = "[Interface]\nPrivateKey = A\nDNS = 1.1.1.1\n[Peer]\nPublicKey = B\n"
 let p2 = SplitDNS.plan(ipOnly)!
@@ -78,7 +78,15 @@ let t0 = Date()
 check(peerIsStale(txDelta: 5_000, handshake: nil, now: t0), "peer with traffic and no handshake is stale")
 check(peerIsStale(txDelta: 5_000, handshake: t0.addingTimeInterval(-300), now: t0), "peer with old handshake is stale")
 check(!peerIsStale(txDelta: 5_000, handshake: t0.addingTimeInterval(-30), now: t0), "peer with fresh handshake is fine")
-check(!peerIsStale(txDelta: 100, handshake: nil, now: t0), "idle peer isn't stale")
+check(!peerIsStale(txDelta: 0, handshake: nil, now: t0), "idle peer isn't stale")
+check(peerIsStale(txDelta: 148, handshake: nil, now: t0), "unreachable peer sending only handshake attempts is stale")
+
+print("log redaction")
+let key = "yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk="
+let red = Log.redact("PrivateKey = \(key)\npresharedkey=\(key)\npeer \(key) handshake")
+check(!red.contains(key) && !red.contains("lXXJte14"), "keys never appear in the log")
+check(red.contains("PrivateKey = <redacted>") && red.contains("presharedkey=<redacted>") && red.contains("peer yAnz… handshake"), "redacted form is readable")
+check(Log.redact("wg-quick up wg-dev ok, 10.0.0.0/16") == "wg-quick up wg-dev ok, 10.0.0.0/16", "normal text untouched")
 
 print("restart backoff")
 let now = Date()
@@ -172,6 +180,8 @@ check(QRImport.decode(img) == qrText, "QR round trip")
 print("stats")
 let table = interfaceTable()
 check(!table.isEmpty && table.keys.allSatisfy { $0.hasPrefix("utun") }, "utun interface table (\(table.count) entries)")
+let counters = exactCounters()
+check(counters["lo0"] != nil && counters.count > 3, "exact counters parse every interface (\(counters.count))")
 check(formatBytes(1536).hasSuffix("KB") && formatBytes(3 * 1024 * 1024).hasSuffix("MB"), "byte formatting: \(formatBytes(1536)), \(formatBytes(3 * 1024 * 1024))")
 
 print("helper scripts")

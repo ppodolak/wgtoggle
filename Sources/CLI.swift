@@ -18,7 +18,8 @@ enum CLI {
           version               app and wireguard-tools versions
           diagnose              status plus app settings (no keys are printed)
 
-        Exit codes: 0 ok, 1 failed or problems found, 2 usage error,
+        Exit codes: 0 ok, 1 failed or problems found (profile: previous tunnels restored),
+                    2 usage error, 3 profile switch and rollback both failed,
                     4 incomplete (some configs couldn't be checked).
         JSON output has a "version" field; it changes only when fields are removed or renamed.
 
@@ -59,13 +60,17 @@ enum CLI {
                 fputs("wgtoggle profile: switch to \(name) failed (up: \(after.sorted().joined(separator: ", "))), restoring previous tunnels\n", stderr)
                 _ = apply(after.subtracting(before).sorted(), up: false)
                 _ = apply(before.subtracting(after).sorted(), up: true)
-                return 1
+                let restored = Set(listTunnels().filter(\.isUp).map(\.name))
+                if restored == before { fputs("previous tunnels restored\n", stderr); return 1 }
+                fputs("wgtoggle profile: rollback incomplete, now up: \(restored.sorted().joined(separator: ", "))\n", stderr)
+                return 3
             }
         case "routes":
             let rows = listTunnels().map { t in (t, configText(t).map(allowedIPs) ?? []) }
             if rest.contains("--json") {
                 return printJSON(["tunnels": rows.map { ["name": $0.0.name, "up": $0.0.isUp, "allowedIPs": $0.1] }])
             }
+            print("configured AllowedIPs (what each tunnel routes when up; see `netstat -rn` for the live table)")
             for (t, r) in rows { print("\(t.isUp ? "up  " : "down")  \(t.name.padding(toLength: 16, withPad: " ", startingAt: 0)) \(r.isEmpty ? "(config not readable)" : r.joined(separator: ", "))") }
             return 0
         case "conflicts":
@@ -181,7 +186,10 @@ enum CLI {
             guard let t = all.first(where: { $0.name == name }) else {
                 fputs("wgtoggle: no tunnel named \(name)\n", stderr); rc = 2; continue
             }
-            if t.isUp == up { print("\(name) is already \(up ? "up" : "down")"); continue }
+            switch (t.state, up) {
+            case (.up, true), (.down, false): print("\(name) is already \(up ? "up" : "down")"); continue
+            default: break   // includes .unknown: run the command rather than assume
+            }
             // Same rule as the app: hooks run as root, so they must have been approved.
             if let data = FileManager.default.contents(atPath: t.path),
                !hookLines(String(decoding: data, as: UTF8.self)).isEmpty, !HookApproval.isApproved(data) {

@@ -19,9 +19,10 @@ struct TunnelStats {
     var stalePeers: [String] = []
 }
 
-/// A peer is stale when data was sent to it during the window but its handshake is old or missing.
+/// A peer is stale when something was sent to it during the window but its handshake is old or missing.
+/// Any traffic counts: an unreachable peer only gets ~148-byte handshake initiations, an idle one gets nothing.
 func peerIsStale(txDelta: UInt64, handshake: Date?, now: Date = Date(), limit: TimeInterval = HealthMonitor.handshakeLimit) -> Bool {
-    txDelta > 2_000 && (handshake.map { now.timeIntervalSince($0) > limit } ?? true)
+    txDelta > 0 && (handshake.map { now.timeIntervalSince($0) > limit } ?? true)
 }
 
 /// iface → (first IPv4 address, all IPv4/IPv6 addresses, rx bytes, tx bytes)
@@ -75,17 +76,20 @@ func exactCounters() -> [String: (rx: UInt64, tx: UInt64)] {
     var out: [String: (rx: UInt64, tx: UInt64)] = [:]
     buf.withUnsafeBytes { raw in
         var off = 0
-        while off + MemoryLayout<if_msghdr>.size <= len {
-            let hdr = raw.load(fromByteOffset: off, as: if_msghdr.self)
-            guard hdr.ifm_msglen > 0 else { break }
-            if Int32(hdr.ifm_type) == RTM_IFINFO2, off + MemoryLayout<if_msghdr2>.size <= len {
+        // Every routing message starts with msglen (UInt16), version (UInt8), type (UInt8); other message
+        // kinds (addresses) are shorter than if_msghdr, so only that common header is read for all of them.
+        while off + 4 <= len {
+            let msglen = Int(raw.loadUnaligned(fromByteOffset: off, as: UInt16.self))
+            let type = Int32(raw.load(fromByteOffset: off + 3, as: UInt8.self))
+            guard msglen >= 4, off + msglen <= len else { break }   // malformed/truncated
+            if type == RTM_IFINFO2, msglen >= MemoryLayout<if_msghdr2>.size {
                 let m = raw.loadUnaligned(fromByteOffset: off, as: if_msghdr2.self)
                 var nameBuf = [CChar](repeating: 0, count: Int(IFNAMSIZ))
                 if if_indextoname(UInt32(m.ifm_index), &nameBuf) != nil {
                     out[String(cString: nameBuf)] = (m.ifm_data.ifi_ibytes, m.ifm_data.ifi_obytes)
                 }
             }
-            off += Int(hdr.ifm_msglen)
+            off += msglen
         }
     }
     return out
@@ -165,6 +169,10 @@ final class HealthMonitor {
             newStats[t.name] = s
         }
         for name in samples.keys where newStats[name] == nil { samples[name] = nil; notifiedStuck.remove(name) }
+        // Drop peer history for tunnels that are down and peers that left the config.
+        let live = Set(newStats.keys.flatMap { n in (helper[n]?.peers ?? []).map { "\(n)/\($0.key)" } })
+        peerSamples = peerSamples.filter { live.contains($0.key) }
+        notifiedPeers.formIntersection(live)
         stats = newStats
         return (newStats, newlyStuck, newlyStalePeers)
     }

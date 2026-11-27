@@ -39,7 +39,16 @@ enum Log {
     static func error(_ m: String, detail: String? = nil) { emit(.error, "ERROR", m, detail) }
 
     /// `detail` (command output) is marked private in the unified log; the 0600 log file keeps it in full.
-    private static func emit(_ type: OSLogType, _ level: String, _ m: String, _ detail: String?) {
+    /// Strips WireGuard keys: `PrivateKey/PresharedKey = …` values, and any bare 44-char base64 key
+    /// (public keys too, shortened to a recognisable prefix).
+    static func redact(_ s: String) -> String {
+        var out = s.replacingOccurrences(of: #"(?i)((?:Private|Preshared)Key\s*=\s*)\S+"#, with: "$1<redacted>", options: .regularExpression)
+        out = out.replacingOccurrences(of: #"(?<![A-Za-z0-9+/])([A-Za-z0-9+/]{4})[A-Za-z0-9+/]{39}="#, with: "$1…", options: .regularExpression)
+        return out
+    }
+
+    private static func emit(_ type: OSLogType, _ level: String, _ m0: String, _ detail0: String?) {
+        let m = redact(m0), detail = detail0.map(redact)
         if let detail, !detail.isEmpty {
             os.log(level: type, "\(m, privacy: .public)\n\(detail, privacy: .private)")
             write(level, m + "\n" + detail)
