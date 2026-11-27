@@ -1,0 +1,27 @@
+#compdef wgtoggle
+_wgtoggle() {
+  local -a cmds
+  cmds=(
+    'list:tunnels and whether they are up'
+    'status:state, interface, IP, traffic, handshake'
+    'up:connect tunnels'
+    'down:disconnect tunnels'
+    'profile:connect exactly the tunnels in a saved profile'
+    'routes:networks each tunnel routes'
+    'conflicts:overlapping routes and shared DNS domains'
+    'dns:active split-DNS resolvers'
+    'version:app, wireguard-tools and helper versions'
+    'diagnose:status plus settings'
+    'help:show usage'
+  )
+  if (( CURRENT == 2 )); then
+    _describe 'command' cmds
+    return
+  fi
+  case $words[2] in
+    up|down) compadd -- ${(f)"$(wgtoggle list --names 2>/dev/null)"} ;;
+    profile) (( CURRENT == 3 )) && compadd -- ${(f)"$(wgtoggle list --profiles 2>/dev/null)"} ;;
+    status|routes) compadd -- --json ;;
+  esac
+}
+_wgtoggle "$@"

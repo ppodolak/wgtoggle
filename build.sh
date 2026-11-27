@@ -20,6 +20,7 @@ cat > "$APP/Contents/Resources/wgtoggle" <<'SH'
 exec "$(dirname "$(/usr/bin/readlink -f "$0")")/../MacOS/WGToggle" cli "$@"
 SH
 chmod 755 "$APP/Contents/Resources/wgtoggle"
+cp -R Resources/completions "$APP/Contents/Resources/"
 # CI passes APP_VERSION (from the git tag) and BUILD_NUMBER
 if [ -n "${APP_VERSION:-}" ]; then
   plutil -replace CFBundleShortVersionString -string "$APP_VERSION" "$APP/Contents/Info.plist"

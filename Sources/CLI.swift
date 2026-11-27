@@ -30,6 +30,9 @@ enum CLI {
         let rest = Array(args.dropFirst())
         switch cmd {
         case "list":
+            // --names / --profiles: plain lists for shell completion (no status lookups, fast)
+            if rest.contains("--names") { listTunnels().forEach { print($0.name) }; return 0 }
+            if rest.contains("--profiles") { Profiles.all.keys.sorted().forEach { print($0) }; return 0 }
             for t in listTunnels() { print("\(t.isUp ? "up  " : "down")  \(t.name)") }
             return 0
         case "status":
@@ -136,6 +139,13 @@ enum CLI {
     }
 
     static func setState(_ names: [String], up: Bool) -> Int32 {
+        var lock = OpLock.acquire(wait: 0)
+        if lock == nil {
+            fputs("waiting for another WGToggle operation to finish…\n", stderr)
+            lock = OpLock.acquire(wait: 60)
+        }
+        guard let lock else { fputs("wgtoggle: still busy after 60s, giving up\n", stderr); return 1 }
+        defer { OpLock.release(lock) }
         let all = listTunnels()
         let verb = up ? "up" : "down"
         var rc: Int32 = 0

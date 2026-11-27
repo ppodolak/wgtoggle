@@ -72,6 +72,59 @@ check(restartDelay(previous: [now, now, now].map { $0.addingTimeInterval(-16 * 6
 print("cli")
 check(CLI.run(["bogus"]) == 2 && CLI.run(["up"]) == 2 && CLI.run(["up", "no-such-tunnel"]) == 2, "cli rejects bad input")
 
+print("shared split DNS")
+do {
+    let base = NSTemporaryDirectory() + "wgdns-\(UUID().uuidString.prefix(8))"
+    let R = base + "/resolver", M = base + "/markers", W = base + "/run"
+    try! FileManager.default.createDirectory(atPath: W, withIntermediateDirectories: true)
+    let hooks = SplitDNS.hooks(domain: "corp", nameservers: "nameserver 10.0.0.53\\n", resolverDir: R, markerDir: M, runDir: W)
+    func hook(_ prefix: String, _ iface: String) {
+        let cmd = hooks.first { $0.hasPrefix(prefix) }!.split(separator: "=", maxSplits: 1)[1]
+            .trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "%i", with: iface)
+        let p = Process(); p.executableURL = URL(fileURLWithPath: "/bin/bash"); p.arguments = ["-c", "(eval \"$1\")", "_", cmd]
+        try! p.run(); p.waitUntilExit()
+    }
+    var socks: [String: Int32] = [:]
+    func sock(_ iface: String, alive: Bool) {   // stands in for wireguard-go's control socket
+        let path = "\(W)/\(iface).sock"
+        if alive {
+            let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+            var addr = sockaddr_un(); addr.sun_family = sa_family_t(AF_UNIX)
+            withUnsafeMutableBytes(of: &addr.sun_path) { buf in _ = path.utf8CString.withUnsafeBytes { buf.copyMemory(from: $0) } }
+            _ = withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) } }
+            socks[iface] = fd
+        } else {
+            if let fd = socks[iface] { close(fd) }
+            unlink(path)
+        }
+    }
+    let resolver = R + "/corp"
+    let fm = FileManager.default
+    hook("PostUp", "utun10"); sock("utun10", alive: true)
+    hook("PostUp", "utun11"); sock("utun11", alive: true)
+    check(fm.fileExists(atPath: resolver), "resolver created")
+    sock("utun11", alive: false); hook("PostDown", "utun11")
+    check(fm.fileExists(atPath: resolver), "second tunnel down: resolver kept for the first")
+    sock("utun10", alive: false); hook("PostDown", "utun10")
+    check(!fm.fileExists(atPath: resolver), "last tunnel down: resolver removed")
+    hook("PostUp", "utun10"); sock("utun10", alive: true)
+    hook("PostUp", "utun11"); sock("utun11", alive: false)   // utun11 crashed, its marker is stale
+    sock("utun10", alive: false); hook("PostDown", "utun10")
+    check(!fm.fileExists(atPath: resolver), "stale marker of a dead tunnel doesn't keep the resolver")
+    let x = "[Interface]\n" + hooks.joined(separator: "\n").replacingOccurrences(of: M, with: SplitDNS.markerDir)
+    check(conflicts(name: "a", conf: x, others: [(name: "b", conf: x)]).isEmpty, "no shared-DNS warning when both coordinate")
+    try? fm.removeItem(atPath: base)
+}
+
+print("operation lock")
+let l1 = OpLock.acquire(wait: 0)
+check(l1 != nil, "lock acquired")
+check(OpLock.acquire(wait: 0.3) == nil, "second holder blocked")
+OpLock.release(l1!)
+let l2 = OpLock.acquire(wait: 0)
+check(l2 != nil, "lock free again after release")
+OpLock.release(l2!)
+
 print("updates")
 check(Updates.isNewer("1.3.0", than: "1.2") && Updates.isNewer("1.10", than: "1.9.9"), "newer")
 check(!Updates.isNewer("1.2.0", than: "1.2") && !Updates.isNewer("1.2", than: "1.2.1"), "not newer")

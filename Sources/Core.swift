@@ -119,10 +119,34 @@ func conflicts(name: String, conf: String, others: [(name: String, conf: String)
     for o in others {
         for a in routes { for b in allowedIPs(o.conf) where cidrOverlap(a, b) { out.append("\(name): \(a) overlaps \(o.name): \(b)") } }
         for d in domains.intersection(resolverDomains(o.conf)).sorted() {
+            // Both use WGToggle's shared split-DNS hooks: they coordinate, nothing to warn about.
+            let shared = "\(SplitDNS.markerDir)/\(d)."
+            if conf.contains(shared) && o.conf.contains(shared) { continue }
             out.append("\(name): split DNS for \(d) is also managed by \(o.name), disconnecting either removes it for both")
         }
     }
     return out
+}
+
+/// One tunnel operation at a time across the app and the `wgtoggle` CLI.
+/// flock(2): released automatically if the holder crashes.
+enum OpLock {
+    static let path = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches/WGToggle/op.lock").path
+
+    /// Returns the locked file descriptor, or nil if another operation still holds it after `wait` seconds.
+    static func acquire(wait: TimeInterval) -> Int32? {
+        try? FileManager.default.createDirectory(atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+        let fd = open(path, O_CREAT | O_RDWR, 0o600)
+        guard fd >= 0 else { return nil }
+        let deadline = Date().addingTimeInterval(wait)
+        while flock(fd, LOCK_EX | LOCK_NB) != 0 {
+            if Date() >= deadline { close(fd); return nil }
+            usleep(200_000)
+        }
+        return fd
+    }
+
+    static func release(_ fd: Int32) { flock(fd, LOCK_UN); close(fd) }
 }
 
 /// Config text for checks: the file if readable, else the helper's key-free view of a root-only config.

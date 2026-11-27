@@ -163,6 +163,8 @@ Several tunnels work side by side when they meet these conditions:
 
    With this, only `*.corp` names go to the VPN's DNS. Everything else keeps using your normal DNS.
 
+   When WGToggle converts a config for you, the hooks it writes also handle **two tunnels sharing a domain**: each running tunnel leaves a marker in `/var/run/wgtoggle-dns/`, and the resolver file is only removed when the last tunnel using it disconnects (markers of tunnels that crashed are ignored).
+
    > Use `ping`, `curl` or `dscacheutil -q host -a name host.corp` to test. `dig` and `nslookup` skip `/etc/resolver` and will wrongly say the name doesn't exist.
 
 WGToggle checks rules 1–3 when you add a tunnel.
@@ -185,6 +187,10 @@ wgtoggle diagnose              # status plus settings, no keys printed
 ```
 
 Exit codes: `0` ok, `1` failed or problems found (handy in scripts: `wgtoggle conflicts || exit 1`), `2` usage error. JSON output (`status --json`, `routes --json`) has a `"version"` field that changes only if fields are removed or renamed.
+
+Tab completion for zsh, bash and fish is installed by the cask (commands, tunnel names, profiles). Without Homebrew, source the files in `WGToggle.app/Contents/Resources/completions/`.
+
+The app and the CLI never change tunnels at the same time: whichever starts first holds a lock, the CLI waits up to 60 seconds, and the app tells you it's busy.
 
 It shares settings with the app. Connecting asks for your password in the terminal unless passwordless mode is on, and configs with hooks must be approved in the app first.
 
@@ -331,7 +337,7 @@ Ideas being considered, roughly in order. Suggestions welcome in [issues](https:
 - [x] Command line tool: `wgtoggle status --json`, `up`, `down`, `profile`
 - [x] Route and conflict view on the command line (`wgtoggle routes`, `wgtoggle conflicts`)
 - [ ] Route view in the app, conflicts highlighted before connecting
-- [ ] Split DNS managed by the helper with ownership tracking, so two tunnels can share a domain
+- [x] Two tunnels sharing a split-DNS domain (marker-based hooks)
 - [ ] Install the root-owned tool copies without enabling passwordless mode
 - [x] IPv6 overlap and `::/0` checks
 - [ ] Profiles by Wi-Fi network

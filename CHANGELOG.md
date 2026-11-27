@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.6.0 - 2026-11-27
+
+### Added
+- Two tunnels can share a split-DNS domain: hooks written by WGToggle track which running tunnels use a resolver and only remove it when the last one disconnects. No more warning for configs that use them.
+- Shell completion for zsh, bash and fish (commands, tunnel names, profiles), installed by the Homebrew cask.
+- The app and `wgtoggle` no longer change tunnels at the same time (shared lock; the CLI waits, the app reports busy).
+- `wgtoggle list --names` and `--profiles` for scripts and completion.
+
 ## 1.5.0 - 2026-11-27
 
 ### Added

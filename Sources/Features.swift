@@ -24,6 +24,20 @@ enum SplitDNS {
     }
 
     /// Removes DNS lines; when domains are known, adds resolver hooks right after [Interface].
+    static let resolverDir = "/etc/resolver"
+    /// One marker per (domain, interface) while a tunnel is up; /var/run is cleared at boot.
+    static let markerDir = "/var/run/wgtoggle-dns"
+
+    /// Hook lines for one domain. Several tunnels can share a domain: each leaves a marker, and the
+    /// resolver file is only removed when no marker of a still-running tunnel (live wireguard-go socket) is left.
+    static func hooks(domain d: String, nameservers ns: String, resolverDir: String = resolverDir,
+                      markerDir: String = markerDir, runDir: String = "/var/run/wireguard") -> [String] {
+        [
+            "PostUp = mkdir -p \(resolverDir) \(markerDir) && printf '\(ns)' > \(resolverDir)/\(d) && touch \(markerDir)/\(d).%i",
+            "PostDown = rm -f \(markerDir)/\(d).%i; for m in \(markerDir)/\(d).*; do [ -S \"\(runDir)/${m##*.}.sock\" ] && exit 0; done; rm -f \(resolverDir)/\(d)",
+        ]
+    }
+
     static func convert(_ conf: String, plan: Plan) -> String {
         var lines = conf.components(separatedBy: "\n").filter {
             $0.range(of: #"^\s*DNS\s*="#, options: [.regularExpression, .caseInsensitive]) == nil
@@ -33,10 +47,7 @@ enum SplitDNS {
         else { return lines.joined(separator: "\n") }
         let ns = plan.servers.map { "nameserver \($0)\\n" }.joined()
         var hooks = ["# Split DNS (added by WGToggle): only these domains use the VPN's DNS"]
-        for d in plan.domains {
-            hooks.append("PostUp = mkdir -p /etc/resolver && printf '\(ns)' > /etc/resolver/\(d)")
-            hooks.append("PostDown = rm -f /etc/resolver/\(d)")
-        }
+        for d in plan.domains { hooks += Self.hooks(domain: d, nameservers: ns) }
         lines.insert(contentsOf: hooks, at: i + 1)
         return lines.joined(separator: "\n")
     }

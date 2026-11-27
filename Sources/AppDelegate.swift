@@ -290,6 +290,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// work runs on main; the icon keeps pulsing via Core Animation. Helper (sudo -n) work runs in the background.
     func runTask(what: String, status: String? = nil, needsPrompt: Bool = true, _ work: @escaping () throws -> String) {
         guard busy == nil else { Log.warn("\(what) ignored: busy with \(busy!)"); return }
+        guard let lock = OpLock.acquire(wait: 0) else {
+            Log.warn("\(what) skipped: a wgtoggle command is running")
+            Notify.error("WGToggle is busy", "A wgtoggle command in the terminal is changing tunnels. Try again when it's done.")
+            return
+        }
         busy = status ?? "Working…"
         startBlink()
         CATransaction.flush()   // commit the pulse animation before main may block on the dialog
@@ -306,6 +311,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 failure = error.localizedDescription
             }
             DispatchQueue.main.async {
+                OpLock.release(lock)
                 self.busy = nil
                 self.stopBlink()
                 if cancelled { Log.info("\(what): admin prompt cancelled") }
