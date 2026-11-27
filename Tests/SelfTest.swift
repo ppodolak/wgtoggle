@@ -12,7 +12,7 @@ print("names / routes / hooks")
 check(isValidName("wg-dev") && isValidName("a.b_c=d+e-f"), "valid names")
 check(!isValidName("corporate-vpn-prd") && !isValidName("../x") && !isValidName("a b") && !isValidName(""), "invalid names rejected")
 check(cidrOverlap("10.0.7.0/24", "10.0.0.0/16") && !cidrOverlap("10.1.0.0/16", "10.0.0.0/16"), "CIDR overlap")
-check(!cidrOverlap("garbage", "10.0.0.0/8") && cidrOverlap("0.0.0.0/0", "172.16.0.0/16"), "CIDR edge cases")
+check(!cidrOverlap("garbage", "10.0.0.0/8") && cidrOverlap("0.0.0.0/0", "172.16.0.0/16") && !cidrOverlap("10.0.0.0/99", "10.0.0.1/32"), "CIDR edge cases")
 check(hookLines("  postup=x\nPreDown = y\n# PostUp = z\nPostUpX = w").count == 2, "hook detection")
 
 let conf = """
@@ -26,7 +26,12 @@ MTU = 1380
 PublicKey = BBBB
 AllowedIPs = 10.0.0.0/16, 10.100.0.0/16, fd00::/64
 """
-check(allowedIPs(conf) == ["10.0.0.0/16", "10.100.0.0/16"], "AllowedIPs (IPv4 only)")
+check(allowedIPs(conf) == ["10.0.0.0/16", "10.100.0.0/16", "fd00::/64"], "AllowedIPs (IPv4 and IPv6)")
+check(cidrOverlap("fd00::/64", "fd00::1/128") && !cidrOverlap("fd00::/64", "fd01::/64"), "IPv6 overlap")
+check(cidrOverlap("::/0", "2001:db8::/32") && !cidrOverlap("::/0", "0.0.0.0/0"), "IPv6 default route, families never mix")
+check(parseCIDR("10.0.0.0/33") == nil && parseCIDR("10.0.0.0/x") == nil && parseCIDR("fd00::/129") == nil && parseCIDR("10.0.0") == nil, "invalid CIDRs rejected")
+check(parseCIDR("0.0.0.0/0")?.bits == 0 && parseCIDR("10.1.2.3")?.bits == 32, "prefix lengths")
+check(resolverDomains("PostUp = printf 'x' > /etc/resolver/Corp\nPostDown = rm -f /etc/resolver/corp\nPostUp = echo /etc/resolver/lab.example") == ["corp", "lab.example"], "resolver domains from hooks")
 let tmp = NSTemporaryDirectory() + "wgtest-\(UUID().uuidString).conf"
 try! conf.write(toFile: tmp, atomically: true, encoding: .utf8)
 check(tunnelAddress(tmp) == "10.10.3.10", "tunnel address")
@@ -46,6 +51,9 @@ check(p2.domains.isEmpty && hookLines(SplitDNS.convert(ipOnly, plan: p2)).isEmpt
 check(SplitDNS.plan("[Interface]\nPrivateKey = A\n") == nil, "no DNS line -> no plan")
 let evil = "[Interface]\nDNS = 10.0.0.1, x;rm -rf /, a$(id)\n"
 check(SplitDNS.plan(evil)!.domains.isEmpty, "shell metacharacters never become domains")
+
+print("cli")
+check(CLI.run(["bogus"]) == 2 && CLI.run(["up"]) == 2 && CLI.run(["up", "no-such-tunnel"]) == 2, "cli rejects bad input")
 
 print("updates")
 check(Updates.isNewer("1.3.0", than: "1.2") && Updates.isNewer("1.10", than: "1.9.9"), "newer")

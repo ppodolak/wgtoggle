@@ -13,6 +13,13 @@ lipo -create build/WGToggle-arm64 build/WGToggle-x86_64 -output "$APP/Contents/M
 rm build/WGToggle-*
 
 cp Resources/Info.plist "$APP/Contents/"
+# `wgtoggle` command line wrapper (Homebrew links it into bin/)
+cat > "$APP/Contents/Resources/wgtoggle" <<'SH'
+#!/bin/bash
+# Resolve symlinks so the app bundle (and its settings) is found.
+exec "$(dirname "$(/usr/bin/readlink -f "$0")")/../MacOS/WGToggle" cli "$@"
+SH
+chmod 755 "$APP/Contents/Resources/wgtoggle"
 # CI passes APP_VERSION (from the git tag) and BUILD_NUMBER
 if [ -n "${APP_VERSION:-}" ]; then
   plutil -replace CFBundleShortVersionString -string "$APP_VERSION" "$APP/Contents/Info.plist"

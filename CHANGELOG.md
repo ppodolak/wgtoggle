@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 1.4.0 - 2026-11-27
+
+### Added
+- `wgtoggle` command line tool (installed by the Homebrew cask).
+- IPv6 overlap checks and warnings for `::/0`, invalid `AllowedIPs` entries, and split DNS domains shared by two tunnels.
+- README screenshots, demo GIF and a `--demo` mode used to make them.
+
+### Changed
+- When passwordless mode is installed, password-prompted commands also use the root-owned tool copies instead of Homebrew's.
+- Command output is marked private in the unified log.
+- CI: read-only build job, separate release job holding write access and the tap token, actions pinned to commit SHAs, Dependabot for actions.
+
+### Fixed
+- Traffic counters resetting after a tunnel restart could trigger a false "stuck" warning.
+- Log Explorer level filters were hard to read when enabled.
+
 ## 1.3.0 - 2026-11-26
 
 ### Added

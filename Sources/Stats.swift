@@ -109,8 +109,11 @@ final class HealthMonitor {
             var hist = (samples[t.name] ?? []).filter { now.timeIntervalSince($0.0) <= Self.window + 10 }
             hist.append((now, s.rx, s.tx))
             samples[t.name] = hist
+            // Counters went backwards (interface re-created): start the window over.
+            if let oldest = hist.first, s.rx < oldest.1 || s.tx < oldest.2 { hist = [(now, s.rx, s.tx)] }
+            samples[t.name] = hist
             if let oldest = hist.first, now.timeIntervalSince(oldest.0) >= Self.window {
-                let rxDelta = s.rx &- oldest.1, txDelta = s.tx &- oldest.2
+                let rxDelta = s.rx - oldest.1, txDelta = s.tx - oldest.2
                 // Data leaves but (almost) nothing comes back: only handshake-sized replies.
                 let silent = txDelta > 2_000 && rxDelta < 400
                 let staleHandshake = s.handshake.map { now.timeIntervalSince($0) > Self.handshakeLimit && txDelta > 2_000 } ?? false

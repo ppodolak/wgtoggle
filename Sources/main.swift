@@ -12,10 +12,24 @@ import ServiceManagement
 //   • ~/Library/Logs/WGToggle/wgtoggle.log (rotated at 1 MB, one backup kept)
 // Config contents and keys are NEVER logged — only names, paths, commands and wg-quick output.
 
+/// `--demo`: sample tunnels, stats and log for screenshots. Never reads real configs or the real log.
+let demoMode = CommandLine.arguments.contains("--demo")
+
+enum Demo {
+    static let up = Set((CommandLine.arguments.first { $0.hasPrefix("--demo-up=") }?.dropFirst(10)
+        .split(separator: ",").map(String.init)) ?? ["dev", "prod"])
+    static let tunnels = ["dev", "homelab", "prod"].map { Tunnel(name: $0, path: "/opt/homebrew/etc/wireguard/\($0).conf") }
+    static let stats: [String: TunnelStats] = [
+        "dev": TunnelStats(iface: "utun6", address: "10.8.0.2", rx: 48_312_005, tx: 6_220_114, handshake: Date().addingTimeInterval(-14)),
+        "prod": TunnelStats(iface: "utun7", address: "10.20.0.5", rx: 2_093_440, tx: 731_902, handshake: Date().addingTimeInterval(-41)),
+    ]
+}
+
 enum Log {
     static let os = Logger(subsystem: "local.wgtoggle", category: "app")
     static let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/WGToggle")
-    static let file = dir.appendingPathComponent("wgtoggle.log")
+    static let file = demoMode ? URL(fileURLWithPath: NSTemporaryDirectory() + "wgtoggle-demo.log")
+        : dir.appendingPathComponent("wgtoggle.log")
     static let queue = DispatchQueue(label: "wgtoggle.log")
     static let stamp: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
@@ -23,9 +37,20 @@ enum Log {
         return f
     }()
 
-    static func info(_ m: String) { os.info("\(m, privacy: .public)"); write("INFO ", m) }
-    static func warn(_ m: String) { os.warning("\(m, privacy: .public)"); write("WARN ", m) }
-    static func error(_ m: String) { os.error("\(m, privacy: .public)"); write("ERROR", m) }
+    static func info(_ m: String, detail: String? = nil) { emit(.info, "INFO ", m, detail) }
+    static func warn(_ m: String, detail: String? = nil) { emit(.default, "WARN ", m, detail) }
+    static func error(_ m: String, detail: String? = nil) { emit(.error, "ERROR", m, detail) }
+
+    /// `detail` (command output) is marked private in the unified log; the 0600 log file keeps it in full.
+    private static func emit(_ type: OSLogType, _ level: String, _ m: String, _ detail: String?) {
+        if let detail, !detail.isEmpty {
+            os.log(level: type, "\(m, privacy: .public)\n\(detail, privacy: .private)")
+            write(level, m + "\n" + detail)
+        } else {
+            os.log(level: type, "\(m, privacy: .public)")
+            write(level, m)
+        }
+    }
 
     private static func write(_ level: String, _ m: String) {
         let line = "\(stamp.string(from: Date())) \(level) \(m)\n"
@@ -71,6 +96,7 @@ struct Tunnel {
     /// wg-quick leaves <name>.name behind if wireguard-go dies, so the name file alone isn't proof.
     /// Up = name file exists AND the tunnel's interface is really there.
     var isUp: Bool {
+        if demoMode { return Demo.up.contains(name) }
         let fm = FileManager.default
         guard fm.fileExists(atPath: "\(runDir)/\(name).name") else { return false }
         if let addr = tunnelAddress(path) {
@@ -95,6 +121,7 @@ func isValidName(_ s: String) -> Bool {
 }
 
 func listTunnels() -> [Tunnel] {
+    if demoMode { return Demo.tunnels }
     var seen = Set<String>()
     var result: [Tunnel] = []
     let order = Helper.isInstalled ? [Helper.configDir] + configDirs.filter { $0 != Helper.configDir } : configDirs
@@ -112,10 +139,17 @@ func listTunnels() -> [Tunnel] {
 
 // MARK: - Config inspection
 
-/// IPv4 CIDRs from all AllowedIPs lines.
+/// CIDRs (IPv4 and IPv6) from all AllowedIPs lines.
 func allowedIPs(_ conf: String) -> [String] {
     confValues(conf, key: "allowedips").flatMap { $0.split(separator: ",") }
-        .map { $0.trimmingCharacters(in: .whitespaces) }.filter { $0.contains(".") }
+        .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+}
+
+/// /etc/resolver domains a config's hooks create (split DNS).
+func resolverDomains(_ conf: String) -> Set<String> {
+    Set(hookLines(conf).flatMap { line in
+        line.matches(of: #/\/etc\/resolver\/([A-Za-z0-9.-]+)/#).map { String($0.1).lowercased() }
+    })
 }
 
 /// Values of `Key = value` lines (case-insensitive key).
@@ -134,21 +168,37 @@ func hookLines(_ conf: String) -> [String] {
     }
 }
 
-func parseCIDR(_ s: String) -> (UInt32, UInt32)? {
-    let p = s.split(separator: "/")
-    guard let first = p.first else { return nil }
-    let o = first.split(separator: ".").compactMap { UInt32($0) }
-    guard o.count == 4, o.allSatisfy({ $0 < 256 }) else { return nil }
-    let bits = p.count > 1 ? min(UInt32(p[1]) ?? 32, 32) : 32
-    let mask: UInt32 = bits == 0 ? 0 : ~UInt32(0) << (32 - bits)
-    return ((o[0] << 24 | o[1] << 16 | o[2] << 8 | o[3]) & mask, mask)
+/// Address bytes and prefix length; nil for anything malformed (including prefixes out of range).
+func parseCIDR(_ s: String) -> (bytes: [UInt8], bits: Int)? {
+    let p = s.split(separator: "/", omittingEmptySubsequences: false)
+    guard p.count <= 2 else { return nil }
+    let ip = String(p[0])
+    var bytes: [UInt8]
+    if ip.contains(":") {
+        var a = in6_addr()
+        guard inet_pton(AF_INET6, ip, &a) == 1 else { return nil }
+        bytes = withUnsafeBytes(of: &a) { Array($0) }
+    } else {
+        var a = in_addr()
+        guard inet_pton(AF_INET, ip, &a) == 1 else { return nil }
+        bytes = withUnsafeBytes(of: &a) { Array($0) }
+    }
+    let maxBits = bytes.count * 8
+    guard p.count == 2 else { return (bytes, maxBits) }
+    guard let bits = Int(p[1]), (0...maxBits).contains(bits) else { return nil }
+    return (bytes, bits)
 }
 
-/// Two CIDRs overlap if they agree on the shorter prefix.
+/// Two CIDRs of the same family overlap if they agree on the shorter prefix.
 func cidrOverlap(_ a: String, _ b: String) -> Bool {
-    guard let (na, ma) = parseCIDR(a), let (nb, mb) = parseCIDR(b) else { return false }
-    let m = ma & mb
-    return na & m == nb & m
+    guard let x = parseCIDR(a), let y = parseCIDR(b), x.bytes.count == y.bytes.count else { return false }
+    var left = min(x.bits, y.bits)
+    for i in 0..<x.bytes.count where left > 0 {
+        let mask: UInt8 = left >= 8 ? 0xff : ~(0xff >> UInt8(left))
+        if x.bytes[i] & mask != y.bytes[i] & mask { return false }
+        left -= 8
+    }
+    return true
 }
 
 func sha256(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
@@ -178,7 +228,9 @@ enum HookApproval {
 /// NSAppleScript runs in-process, so macOS caches the authorization for a few minutes.
 @discardableResult
 func runAsAdmin(_ command: String) throws -> String {
-    let full = "export PATH=\(binDirs.joined(separator: ":")):/usr/bin:/bin:/usr/sbin:/sbin; \(command) 2>&1"
+    // Homebrew's tools are user-writable; prefer the root-owned copies from passwordless mode when present.
+    let tools = Helper.isInstalled ? [Helper.dir] : binDirs
+    let full = "export PATH=\(tools.joined(separator: ":")):/usr/bin:/bin:/usr/sbin:/sbin; \(command) 2>&1"
     let escaped = full.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
     let script = NSAppleScript(source: "do shell script \"\(escaped)\" with administrator privileges")!
     var error: NSDictionary?
@@ -216,6 +268,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.menu = menu
         refreshIcon()
         Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in self?.refreshIcon() }
+        sampleStats()
         Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in self?.sampleStats() }
         HotKey.action = { [weak self] in self?.toggleAllShortcut() }
         HotKey.apply()
@@ -225,6 +278,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         Log.info("passwordless mode: \(Helper.isInstalled ? "on" : "off")")
         if CommandLine.arguments.contains("--show-logs") { MainActor.assumeIsolated { LogExplorer.show() } }
         if CommandLine.arguments.contains("--show-about") { showAbout() }
+        // README screenshots: open the menu bar menu programmatically.
+        if CommandLine.arguments.contains("--show-menu") {
+            // Plain backdrop so the translucent menu doesn't pick up whatever is on screen.
+            if demoMode, let screen = NSScreen.main {
+                let w = NSWindow(contentRect: screen.frame, styleMask: .borderless, backing: .buffered, defer: false)
+                w.backgroundColor = NSColor(srgbRed: 0.11, green: 0.12, blue: 0.14, alpha: 1)
+                w.isReleasedWhenClosed = false
+                w.orderFrontRegardless()
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.statusItem.button?.performClick(nil) }
+        }
+        if demoMode {
+            try? FileManager.default.removeItem(at: Log.file)
+            for (lvl, msg) in [("i", "WGToggle \(Updates.current) started; tunnels: dev, homelab, prod"), ("i", "wg-quick up: dev"),
+                               ("i", "dev is now UP"), ("i", "wg-quick up: prod"), ("i", "prod is now UP"),
+                               ("w", "homelab has unapproved hooks (2 lines), asking user"), ("i", "user approved hooks for homelab"),
+                               ("e", "wg-quick up failed"), ("w", "prod looks stuck: traffic goes out but nothing comes back"),
+                               ("i", "restart prod ok")] {
+                lvl == "i" ? Log.info(msg) : lvl == "w" ? Log.warn(msg) : Log.error(msg, detail: "Endpoint not reachable")
+            }
+        }
         if findBinary("wg-quick") == nil {
             Log.warn("wg-quick not found in \(binDirs)")
             installTools()
@@ -464,7 +538,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             var cancelled = false
             do {
                 let out = try work()
-                Log.info("\(what) ok\n\(out.trimmingCharacters(in: .whitespacesAndNewlines))")
+                Log.info("\(what) ok", detail: out.trimmingCharacters(in: .whitespacesAndNewlines))
             } catch let e as NSError where e.code == -128 {
                 cancelled = true
             } catch {
@@ -475,7 +549,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.stopBlink()
                 if cancelled { Log.info("\(what): admin prompt cancelled") }
                 if let failure {
-                    Log.error("\(what) failed: \(failure)")
+                    Log.error("\(what) failed", detail: failure)
                     Notify.error("\(what) failed", failure)
                 }
                 self.refreshIcon()
@@ -613,7 +687,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard let other = try? String(contentsOfFile: t.path, encoding: .utf8) else { continue }
             for a in newRoutes { for b in allowedIPs(other) where cidrOverlap(a, b) { clashes.append("\(a) ↔ \(t.name): \(b)") } }
         }
-        if newRoutes.contains("0.0.0.0/0") { clashes.append("0.0.0.0/0 sends ALL traffic through \(name)") }
+        for r in newRoutes {
+            guard let c = parseCIDR(r) else { clashes.append("\(r) is not a valid network, wg-quick will reject it"); continue }
+            if c.bits == 0 { clashes.append("\(r) sends ALL \(c.bytes.count == 4 ? "IPv4" : "IPv6") traffic through \(name)") }
+        }
+        // Two tunnels managing the same /etc/resolver file: disconnecting one removes DNS for the other.
+        let domains = resolverDomains(contents)
+        for t in existing {
+            guard let other = try? String(contentsOfFile: t.path, encoding: .utf8) else { continue }
+            for d in domains.intersection(resolverDomains(other)).sorted() {
+                clashes.append("split DNS for \(d) is also managed by \(t.name): disconnecting either removes it for both")
+            }
+        }
         if !clashes.isEmpty {
             Log.warn("add: \(name) warnings: \(clashes.joined(separator: " | "))")
             if !confirm("\(name) may disturb other tunnels or your internet:\n\n"
@@ -796,7 +881,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.installing = false
                 if p.terminationStatus != 0 || findBinary("wg-quick") == nil {
                     self.installError = out.split(separator: "\n").last.map(String.init) ?? "unknown error"
-                    Log.error("brew install failed (exit \(p.terminationStatus)):\n\(out.suffix(2000))")
+                    Log.error("brew install failed (exit \(p.terminationStatus))", detail: String(out.suffix(2000)))
                     Notify.error("Installing wireguard-tools failed", self.installError ?? "")
                     self.alert("Installing wireguard-tools failed", String(out.suffix(1500)))
                 } else {
@@ -826,6 +911,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func sampleStats() {
+        if demoMode { stats = Demo.stats.filter { Demo.up.contains($0.key) }; refreshIcon(); return }
         let tunnels = listTunnels()
         statsQueue.async { [weak self] in
             guard let self else { return }
@@ -1204,21 +1290,13 @@ enum Dock {
     }
 }
 
-// `WGToggle --diagnose`: print tunnel status, traffic and health, then exit (no keys printed).
+// Command line: `WGToggle cli <command>` (the `wgtoggle` wrapper) or `WGToggle --diagnose`.
+if let i = CommandLine.arguments.firstIndex(of: "cli") {
+    exit(CLI.run(Array(CommandLine.arguments[(i + 1)...])))
+}
 if CommandLine.arguments.contains("--diagnose") {
-    let m = HealthMonitor()
-    let tunnels = listTunnels()
-    print("WGToggle \(Updates.current)  passwordless: \(Helper.isInstalled ? "on" : "off")  config dir: \(preferredConfigDir)")
-    _ = m.sample(tunnels: tunnels)
-    Thread.sleep(forTimeInterval: 2)
-    let r = m.sample(tunnels: tunnels)
-    for t in tunnels {
-        let s = r.stats[t.name]
-        let hs = s?.handshake.map { formatAgo($0) } ?? "-"
-        print("\(t.name.padding(toLength: 16, withPad: " ", startingAt: 0)) \(t.isUp ? "UP  " : "down") iface=\(s?.iface ?? "-") ip=\(s?.address ?? "-") rx=\(formatBytes(s?.rx ?? 0)) tx=\(formatBytes(s?.tx ?? 0)) handshake=\(hs) stuck=\(s?.stuck ?? false)  \(t.path)")
-    }
-    if CommandLine.arguments.contains("--print-installer") { print(Helper.installer(user: NSUserName(), moveFrom: tunnels.map(\.path))) }
-    exit(0)
+    if CommandLine.arguments.contains("--print-installer") { print(Helper.installer(user: NSUserName(), moveFrom: listTunnels().map(\.path))) }
+    exit(CLI.run(["diagnose"]))
 }
 
 let app = NSApplication.shared

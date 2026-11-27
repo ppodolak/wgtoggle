@@ -178,9 +178,10 @@ struct LogExplorerView: View {
                         get: { levels.contains(lvl) },
                         set: { on in if on { levels.insert(lvl) } else { levels.remove(lvl) } })) {
                         Label("\(lvl.label)  \(n)", systemImage: lvl.symbol)
-                            .foregroundStyle(levels.contains(lvl) ? lvl.tint : .secondary)
+                            .foregroundStyle(levels.contains(lvl) ? AnyShapeStyle(.white) : AnyShapeStyle(.secondary))
                     }
                     .toggleStyle(.button)
+                    .tint(lvl == .info ? .gray : lvl.tint)   // on-state fill = level color, not the accent
                     .help("Show \(lvl.label.lowercased()) entries")
                 }
             }
@@ -257,7 +258,7 @@ struct LogExplorerView: View {
             Spacer()
             if store.live { Circle().fill(.green).frame(width: 6, height: 6); Text("Live") } else { Text("Paused") }
             Text("·")
-            Text(Log.file.path.replacingOccurrences(of: NSHomeDirectory(), with: "~"))
+            Text(demoMode ? "~/Library/Logs/WGToggle/wgtoggle.log" : Log.file.path.replacingOccurrences(of: NSHomeDirectory(), with: "~"))
                 .lineLimit(1).truncationMode(.middle)
         }
         .font(.caption).foregroundStyle(.secondary)

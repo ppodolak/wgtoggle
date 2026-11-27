@@ -10,6 +10,8 @@ Run several WireGuard tunnels at the same time on macOS. Keep your development, 
 brew install --cask ppodolak/tap/wgtoggle
 ```
 
+<p align="center"><img src="docs/demo.gif" width="300" alt="WGToggle menu: connecting dev, then prod, side by side"></p>
+
 <p align="center">
   <a href="https://github.com/ppodolak/wgtoggle/actions/workflows/build.yml"><img alt="Build" src="https://github.com/ppodolak/wgtoggle/actions/workflows/build.yml/badge.svg?branch=main"></a>
   <a href="https://github.com/ppodolak/wgtoggle/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/ppodolak/wgtoggle?color=black&cacheSeconds=3600"></a>
@@ -29,7 +31,9 @@ brew install --cask ppodolak/tap/wgtoggle
 - [Install](#install)
 - [Usage](#usage)
 - [Why WGToggle](#why-wgtoggle)
+- [Screenshots](#screenshots)
 - [Running multiple tunnels](#running-multiple-tunnels)
+- [Command line](#command-line)
 - [Logs](#logs)
 - [Passwordless mode](#passwordless-mode)
 - [Security](#security)
@@ -62,6 +66,7 @@ brew install --cask ppodolak/tap/wgtoggle
 - Edit tunnels and import a config from a QR code (clipboard screenshot or image file).
 - Global shortcut ⌃⌥⌘T toggles all tunnels.
 - Update check against GitHub Releases.
+- Command line tool: `wgtoggle status --json`, `up`, `down`, `profile` (see [Command line](#command-line)).
 - Launch at Login: one click, using the system's `SMAppService`.
 - Show in Dock: optional Dock icon. Click it to open the Log Explorer; right-click it to toggle tunnels. Off by default (menu bar only).
 
@@ -130,6 +135,17 @@ The official WireGuard app for macOS is great when you need one tunnel at a time
 
 If you only ever use one tunnel, the official app is the simpler and more locked-down choice.
 
+## Screenshots
+
+<p>
+  <img src="docs/menu.png" width="330" alt="Menu with two tunnels up, showing handshake, traffic and IP">
+  <img src="docs/about.png" width="300" alt="About window">
+</p>
+
+![Log Explorer](docs/log-explorer.png)
+
+<sub>Screenshots use demo data (`--demo`), not real tunnels.</sub>
+
 ## Running multiple tunnels
 
 Several tunnels work side by side when they meet these conditions:
@@ -151,11 +167,24 @@ Several tunnels work side by side when they meet these conditions:
 
 WGToggle checks rules 1–3 when you add a tunnel.
 
+## Command line
+
+The Homebrew cask also installs `wgtoggle`:
+
+```bash
+wgtoggle list                  # tunnels and whether they're up
+wgtoggle status --json         # state, interface, IP, traffic, last handshake
+wgtoggle up dev prod           # connect
+wgtoggle down prod             # disconnect
+wgtoggle profile work          # connect exactly the tunnels in a saved profile
+wgtoggle diagnose              # status plus settings, no keys printed
+```
+
+It shares settings with the app. Connecting asks for your password in the terminal unless passwordless mode is on, and configs with hooks must be approved in the app first.
+
 ## Logs
 
 ### Log Explorer
-
-![Log Explorer](docs/log-explorer.png)
 
 Menu → **Log Explorer…** (⌘L) opens a native window:
 
@@ -209,6 +238,8 @@ A config is a secret (it holds your private key), and it's also code (wg-quick r
 ### Remaining risks (by design)
 
 - **The approved-hash list is stored in the app's user defaults**, which your user can edit. Malware already running as you could pre-approve its own hooks. Hook approval stops casual tampering and mistakes. It can't stop a determined attacker that already runs as your user, and nothing that relies on an admin prompt can.
+- **Without passwordless mode, the admin prompt runs Homebrew's `wg-quick`**, which your user can modify, so malware running as you could swap it and wait for your next password prompt. That's the same as typing `sudo wg-quick` yourself. Passwordless mode removes this by using root-owned copies, also for anything that still asks for the password.
+- **Command output is private in the system log** (it shows as `<private>` in Console) and only kept in full in `~/Library/Logs/WGToggle/wgtoggle.log`, which only you can read.
 - **The admin authorization is cached for a few minutes** after you type your password, as with any app that uses `do shell script … with administrator privileges`.
 - **Configs in `/etc/wireguard`** are root-owned and the app can't read them, so their hooks can't be shown. They're trusted because only root can write there.
 - **The app is ad-hoc signed and not notarized.** Build it yourself, or check where your copy came from.
@@ -286,9 +317,9 @@ WGToggle/
 Ideas being considered, roughly in order. Suggestions welcome in [issues](https://github.com/ppodolak/wgtoggle/issues).
 
 - [ ] Configurable health checks per tunnel (ping or HTTP to an internal host)
-- [ ] Command line tool: `wgtoggle status --json`, `up`, `down`, `profile`
+- [x] Command line tool: `wgtoggle status --json`, `up`, `down`, `profile`
 - [ ] Route view: which networks each tunnel handles, conflicts highlighted before connecting
-- [ ] IPv6 overlap and `::/0` checks
+- [x] IPv6 overlap and `::/0` checks
 - [ ] Profiles by Wi-Fi network
 - [ ] Traffic history per tunnel
 - [ ] Developer ID signing and notarization, then a proper privileged helper (SMAppService + XPC) instead of sudo
