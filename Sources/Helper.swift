@@ -46,7 +46,7 @@ enum Helper {
       [[ $(( 0$(stat -f %Lp "$conf") & 022 )) == 0 ]] || { echo "$conf is group/world writable" >&2; exit 2; }
     }
     case "$cmd" in
-      version) echo 4 ;;
+      version) echo 5 ;;
       dns-repair)
         \#(SplitDNS.repairScript()) ;;
       up|down)
@@ -70,7 +70,8 @@ enum Helper {
             ptr=$("$H/wg" show "$i" transfer 2>/dev/null | awk -v k="$k" '$1 == k {print $2, $3}')
             echo "peer $n $k ${t:-0} ${ptr:-0 0}"
           done
-        done ;;
+        done
+        echo "end $(ls /var/run/wireguard/*.name 2>/dev/null | wc -l | tr -d ' ')" ;;   # completeness marker
       *) echo "usage: wgtoggle-helper up|down|meta NAME | status | dns-repair | version" >&2; exit 2 ;;
     esac
     """#
@@ -105,9 +106,15 @@ enum Helper {
         # Transaction: remember what existed, undo everything on ANY non-zero exit (set -e, failed command,
         # explicit exit). Nothing is deleted until the final check passed.
         COMMITTED=0; HAD_H=0; HAD_RULE=0; NEW_CONFS=(); OVERWRITTEN=()
+        # An earlier install was interrupted (power loss, kill): its leftovers mean it never committed. Undo it first.
+        if [[ -e "$H.old" ]]; then echo "recovering interrupted install" >&2; rm -rf "$H"; mv "$H.old" "$H"; fi
+        if [[ -e "$S.old" ]]; then mv "$S.old" "$S"; fi
+        for f in \#(configDir)/*.wgtoggle-bak; do [[ -e "$f" ]] && mv "$f" "${f%.wgtoggle-bak}"; done
+        rm -rf "$H".new.*
         if [[ -e "$H" ]]; then HAD_H=1; fi
         if [[ -e "$S" ]]; then HAD_RULE=1; cp -p "$S" "$S.old"; fi
         rollback() {
+          set +e   # keep restoring the other parts even if one step fails
           echo "install failed, rolling back" >&2
           rm -rf "$NEW"
           if [[ $HAD_H == 1 ]]; then
@@ -203,11 +210,17 @@ enum Helper {
     }
 
     /// Bump when the helper script changes; older installs get an "update" prompt.
-    static let currentVersion = 4
+    static let currentVersion = 5
 
+    private static var versionCache: Int?
+
+    /// Asked once per process (and again after install/uninstall); status reads depend on it.
     static var installedVersion: Int {
+        if let v = versionCache { return v }
         guard isInstalled else { return 0 }
-        return Int((try? run(["version"]))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") ?? 1
+        let v = Int((try? run(["version"]))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") ?? 1
+        versionCache = v
+        return v
     }
 
     static var needsUpdate: Bool { isInstalled && installedVersion < currentVersion }
@@ -233,7 +246,7 @@ enum Helper {
     }
 
     /// Call after connecting/disconnecting so the next check reads fresh state.
-    static func invalidateCache() { lock.lock(); cache = nil; lock.unlock() }
+    static func invalidateCache() { lock.lock(); cache = nil; versionCache = nil; lock.unlock() }
 
     static func uninstall() throws {
         try runAsAdmin("rm -f \(sudoers) && rm -rf \(shellQuote(dir))")
@@ -266,8 +279,12 @@ enum Helper {
         guard isInstalled else { return nil }
         do {
             let out = try run(["status"])
+            guard let parsed = parseStatus(out, strict: installedVersion >= 5) else {
+                if !lastFailed { Log.error("helper status incomplete, tunnel state unknown", detail: out); lastFailed = true }
+                return nil
+            }
             if lastFailed { Log.info("helper status works again"); lastFailed = false }
-            return parseStatus(out)
+            return parsed
         } catch {
             if !lastFailed { Log.error("helper status failed, tunnel state unknown", detail: error.localizedDescription); lastFailed = true }
             return nil
@@ -275,8 +292,10 @@ enum Helper {
     }
 
     /// `name iface hs rx tx` per tunnel, then `peer name key hs rx tx` per peer (helper v3+).
-    static func parseStatus(_ out: String) -> [String: Status] {
+    /// strict (helper v5+): every line must parse and the output must end with `end N`; else nil.
+    static func parseStatus(_ out: String, strict: Bool = false) -> [String: Status]? {
         var r: [String: Status] = [:]
+        var sawEnd = false
         let date = { (t: TimeInterval) in t > 0 ? Date(timeIntervalSince1970: t) : nil }
         for line in out.split(separator: "\n") {
             let f = line.split(separator: " ").map(String.init)
@@ -284,8 +303,12 @@ enum Helper {
                 r[f[0]] = Status(iface: f[1], handshake: date(hs), rx: rx, tx: tx, peers: r[f[0]]?.peers ?? [])
             } else if f.count == 6, f[0] == "peer", let hs = TimeInterval(f[3]), let rx = UInt64(f[4]), let tx = UInt64(f[5]) {
                 r[f[1]]?.peers.append(Peer(key: f[2], handshake: date(hs), rx: rx, tx: tx))
+            } else if f.count == 2, f[0] == "end", Int(f[1]) != nil {
+                sawEnd = true
+            } else if strict {
+                return nil   // garbled line
             }
         }
-        return r
+        return strict && !sawEnd ? nil : r
     }
 }

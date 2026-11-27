@@ -8,7 +8,8 @@ enum CLI {
         usage: wgtoggle <command>
 
           list                  tunnels and whether they're up
-          status [--json]       state, interface, IP, traffic, last handshake
+          status [--json] [--strict]  state, interface, IP, traffic, last handshake
+                                (--strict: exit 4 if any state is unknown)
           up NAME...            connect tunnels
           down NAME...          disconnect tunnels
           profile NAME          connect exactly the tunnels in a saved profile
@@ -39,7 +40,10 @@ enum CLI {
             for t in listTunnels() { print("\(label(t.state))  \(t.name)") }
             return 0
         case "status":
-            return status(json: rest.contains("--json"))
+            let rc = status(json: rest.contains("--json"))
+            // --strict: monitoring use, exit 4 when any tunnel's state couldn't be determined
+            if rest.contains("--strict"), !snapshot().unknown.isEmpty { return 4 }
+            return rc
         case "up", "down":
             guard !rest.isEmpty else { fputs("wgtoggle \(cmd): name a tunnel\n", stderr); return 2 }
             return setState(rest, up: cmd == "up")
@@ -50,28 +54,7 @@ enum CLI {
             }
             let missing = members.filter { m in !listTunnels().contains { $0.name == m } }
             guard missing.isEmpty else { fputs("wgtoggle profile: \(name) uses unknown tunnels: \(missing.joined(separator: ", "))\n", stderr); return 2 }
-            return withLock {
-                // One transition under one lock: down the extras, up the members, verify, else roll back.
-                let before = Set(listTunnels().filter(\.isUp).map(\.name))
-                let down = before.subtracting(members).sorted(), up = Set(members).subtracting(before).sorted()
-                _ = apply(down, up: false)
-                _ = apply(up, up: true)
-                let now = listTunnels()
-                let unknown = now.filter { $0.state == .unknown }.map(\.name)
-                guard unknown.isEmpty else {
-                    fputs("wgtoggle profile: can't verify \(unknown.joined(separator: ", ")) (state unknown)\n", stderr)
-                    return 4
-                }
-                let after = Set(now.filter(\.isUp).map(\.name))
-                if after == Set(members) { print("profile \(name) active"); return 0 }
-                fputs("wgtoggle profile: switch to \(name) failed (up: \(after.sorted().joined(separator: ", "))), restoring previous tunnels\n", stderr)
-                _ = apply(after.subtracting(before).sorted(), up: false)
-                _ = apply(before.subtracting(after).sorted(), up: true)
-                let restored = Set(listTunnels().filter(\.isUp).map(\.name))
-                if restored == before { fputs("previous tunnels restored\n", stderr); return 1 }
-                fputs("wgtoggle profile: rollback incomplete, now up: \(restored.sorted().joined(separator: ", "))\n", stderr)
-                return 3
-            }
+            return withLock { profileTransition(name, members: members) }
         case "routes":
             let rows = listTunnels().map { t in (t, configText(t).map(allowedIPs) ?? []) }
             if rest.contains("--json") {
@@ -174,6 +157,40 @@ enum CLI {
     }
 
     static func label(_ s: Tunnel.State) -> String { s == .up ? "up  " : s == .down ? "down" : "?   " }
+
+    /// Up tunnels, or nil plus the names whose state can't be determined.
+    static func snapshot() -> (up: Set<String>, unknown: [String]) {
+        let t = listTunnels()
+        return (Set(t.filter { $0.state == .up }.map(\.name)), t.filter { $0.state == .unknown }.map(\.name))
+    }
+
+    /// Profile switch as one transaction (caller holds the lock):
+    /// preflight (every state known), change, verify, and on failure roll back and verify the rollback.
+    /// Exit: 0 active, 1 failed but previous state restored, 3 rollback failed too, 4 state couldn't be verified.
+    static func profileTransition(_ name: String, members: [String]) -> Int32 {
+        let pre = snapshot()
+        guard pre.unknown.isEmpty else {
+            fputs("wgtoggle profile: nothing changed, state of \(pre.unknown.joined(separator: ", ")) is unknown\n", stderr)
+            return 4
+        }
+        let target = Set(members), before = pre.up
+        _ = apply(before.subtracting(target).sorted(), up: false)
+        _ = apply(target.subtracting(before).sorted(), up: true)
+        let post = snapshot()
+        if post.unknown.isEmpty && post.up == target { print("profile \(name) active"); return 0 }
+        fputs("wgtoggle profile: switch to \(name) failed (up: \(post.up.sorted().joined(separator: ", "))\(post.unknown.isEmpty ? "" : ", unknown: \(post.unknown.joined(separator: ", "))")), restoring previous tunnels\n", stderr)
+        // Only undo what we can see; unknown tunnels are reported, not guessed at.
+        _ = apply(post.up.subtracting(before).sorted(), up: false)
+        _ = apply(before.subtracting(post.up).subtracting(post.unknown).sorted(), up: true)
+        let back = snapshot()
+        if !back.unknown.isEmpty {
+            fputs("wgtoggle profile: can't verify the rollback, state unknown: \(back.unknown.joined(separator: ", "))\n", stderr)
+            return 4
+        }
+        if back.up == before { fputs("previous tunnels restored\n", stderr); return 1 }
+        fputs("wgtoggle profile: rollback incomplete, now up: \(back.up.sorted().joined(separator: ", "))\n", stderr)
+        return 3
+    }
 
     /// Every JSON document carries a schema version.
     static func printJSON(_ body: [String: Any]) -> Int32 {

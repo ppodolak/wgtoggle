@@ -34,31 +34,39 @@ enum SplitDNS {
     /// each running tunnel keeps its own resolver content in a marker. On disconnect the resolver is rebuilt
     /// from the newest marker of a tunnel that's still running (live wireguard-go socket), and when none is
     /// left, a resolver file that existed before WGToggle took over is put back (otherwise it's removed).
+    /// Shell test "marker $m belongs to a tunnel that's running right now". Markers are named
+    /// `<domain>.if.<utun>@<tunnel>`: the utun must have a live wireguard-go socket AND wg-quick's runtime
+    /// name file for that tunnel must point at the same utun. utun names get reused after a reboot, so the
+    /// socket alone could belong to a different VPN.
+    static func aliveTest(_ W: String) -> String {
+        #"x="utun${m##*.if.utun}"; i="${x%%@*}"; n="${x#*@}"; [ "$x" != "$i" ] && [ -S "\#(W)/$i.sock" ] && [ "$(cat "\#(W)/$n.name" 2>/dev/null)" = "$i" ]"#
+    }
+
     static func hooks(domain d: String, nameservers ns: String, resolverDir R: String = resolverDir,
                       markerDir M: String = markerDir, runDir W: String = "/var/run/wireguard") -> [String] {
         [
             // keep a resolver file someone else created, the first time we take over this domain
             "PostUp = mkdir -p \(R) \(M) && if [ -e \(R)/\(d) ] && ! ls \(M)/\(d).if.* >/dev/null 2>&1; then cp -p \(R)/\(d) \(M)/\(d).orig; fi",
-            "PostUp = printf '\(ns)' > \(M)/\(d).if.%i && cp \(M)/\(d).if.%i \(R)/\(d)",
-            "PostDown = rm -f \(M)/\(d).if.%i",
-            "PostDown = for m in $(ls -t \(M)/\(d).if.* 2>/dev/null); do if [ -S \"\(W)/${m##*.}.sock\" ]; then cp \"$m\" \(R)/\(d); exit 0; fi; rm -f \"$m\"; done; if [ -e \(M)/\(d).orig ]; then mv \(M)/\(d).orig \(R)/\(d); else rm -f \(R)/\(d); fi",
+            "PostUp = printf '\(ns)' > '\(M)/\(d).if.%i@%I' && cp '\(M)/\(d).if.%i@%I' \(R)/\(d)",
+            "PostDown = rm -f '\(M)/\(d).if.%i@%I'",
+            "PostDown = for m in $(ls -t \(M)/\(d).if.* 2>/dev/null); do if \(aliveTest(W)); then cp \"$m\" \(R)/\(d); exit 0; fi; rm -f \"$m\"; done; if [ -e \(M)/\(d).orig ]; then mv \(M)/\(d).orig \(R)/\(d); else rm -f \(R)/\(d); fi",
         ]
     }
 
     /// Root shell snippet: for every domain WGToggle manages, drop markers of tunnels that aren't running
     /// and rebuild the resolver from one that is, else restore the saved original, else remove it.
-    /// Fixes resolvers left behind by a crash or an unexpected reboot.
+    /// Fixes resolvers left behind by a crash or an unexpected reboot. Running it twice changes nothing.
     static func repairScript(resolverDir R: String = resolverDir, markerDir M: String = markerDir,
                              runDir W: String = "/var/run/wireguard") -> String {
         #"""
         M=\#(M); R=\#(R); W=\#(W)
         [ -d "$M" ] || { echo "nothing to repair"; exit 0; }
-        for d in $(ls "$M" | sed -E 's/\.(if\.[^.]+|orig)$//' | grep -E '^[A-Za-z0-9.-]+$' | sort -u); do
+        for d in $(ls "$M" | sed -E 's/\.if\.utun[0-9]+(@.*)?$//; s/\.orig$//' | grep -E '^[A-Za-z0-9.-]+$' | sort -u); do
           live=""
           for m in $(ls -t "$M/$d".if.* 2>/dev/null); do
-            if [ -S "$W/${m##*.}.sock" ]; then [ -n "$live" ] || live="$m"; else rm -f "$m"; fi
+            if \#(aliveTest(W)); then [ -n "$live" ] || live="$m"; else rm -f "$m"; fi
           done
-          if [ -n "$live" ]; then cp "$live" "$R/$d"; echo "$d: in use by ${live##*.}"
+          if [ -n "$live" ]; then cmp -s "$live" "$R/$d" || cp "$live" "$R/$d"; echo "$d: in use by ${live##*@}"
           elif [ -e "$M/$d.orig" ]; then mv "$M/$d.orig" "$R/$d"; echo "$d: original resolver restored"
           elif [ -e "$R/$d" ]; then rm -f "$R/$d"; echo "$d: stale resolver removed"
           fi

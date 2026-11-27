@@ -109,6 +109,13 @@ struct Tunnel {
         if demoMode { return Demo.up.contains(name) ? .up : .down }
         guard FileManager.default.fileExists(atPath: "\(runDir)/\(name).name") else { return .down }
         if let addr = tunnelAddress(path) {
+            // Same address in another config whose runtime file also exists: ambiguous unless the helper can tell.
+            let twins = listTunnels().filter { $0.name != name && tunnelAddress($0.path) == addr
+                && FileManager.default.fileExists(atPath: "\(runDir)/\($0.name).name") }
+            if !twins.isEmpty {
+                guard Helper.isInstalled, let st = Helper.cachedStatus() else { return .unknown }
+                return st[name].map { interfaceTable()[$0.iface] != nil } == true ? .up : .down
+            }
             return interfaceTable().contains { $0.value.addrs.contains(addr) } ? .up : .down
         }
         // Root-only config: ask the helper which interface belongs to this tunnel and check that one.

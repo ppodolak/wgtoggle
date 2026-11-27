@@ -45,7 +45,7 @@ check(plan.servers == ["10.0.0.53", "10.0.0.54"] && plan.domains == ["corp", "la
 let converted = SplitDNS.convert(conf, plan: plan)
 check(confValues(converted, key: "dns").isEmpty, "DNS line removed")
 check(hookLines(converted).count == 8, "4 hook lines per domain")
-check(converted.contains("printf 'nameserver 10.0.0.53\\nnameserver 10.0.0.54\\n' > /var/db/wgtoggle-dns/corp.if.%i && cp /var/db/wgtoggle-dns/corp.if.%i /etc/resolver/corp"), "resolver hook content")
+check(converted.contains("printf 'nameserver 10.0.0.53\\nnameserver 10.0.0.54\\n' > '/var/db/wgtoggle-dns/corp.if.%i@%I' && cp '/var/db/wgtoggle-dns/corp.if.%i@%I' /etc/resolver/corp"), "resolver hook content")
 check(converted.contains("[Peer]") && converted.contains("MTU = 1380"), "rest of config kept")
 let ipOnly = "[Interface]\nPrivateKey = A\nDNS = 1.1.1.1\n[Peer]\nPublicKey = B\n"
 let p2 = SplitDNS.plan(ipOnly)!
@@ -65,13 +65,17 @@ check(found.contains { $0.contains("split DNS for corp") }, "shared resolver dom
 check(conflicts(name: "b", conf: b, others: []).isEmpty, "clean config has no conflicts")
 
 print("per-peer health")
-let st = Helper.parseStatus("""
+let st0 = Helper.parseStatus("""
 office utun7 1764200000 900 5000
 peer office AAAAkeyA= 1764200000 800 2500
 peer office BBBBkeyB= 0 100 2500
 home utun8 1764100000 10 20
 garbage line
 """)
+check(Helper.parseStatus("a utun1 0 1 2\nend 1\n", strict: true)?["a"] != nil, "strict status with end marker parses")
+check(Helper.parseStatus("a utun1 0 1 2\n", strict: true) == nil, "strict status without end marker = unknown")
+check(Helper.parseStatus("a utun1 0 1 2\nGARBAGE here\nend 1\n", strict: true) == nil, "strict status with a garbled line = unknown")
+let st = st0!
 check(st["office"]?.iface == "utun7" && st["office"]?.peers.count == 2 && st["home"]?.peers.isEmpty == true, "status parser: tunnels and peers")
 check(st["office"]?.peers[1].handshake == nil && st["office"]?.peers[0].tx == 2500, "status parser: peer fields")
 let t0 = Date()
@@ -127,6 +131,19 @@ if findBinary("wg-quick") == nil {
     check(ex("/H/previous") && !ex("/H.old"), "previous helper restored")
     check((try? String(contentsOfFile: T + "/sudoers", encoding: .utf8)) == "old rule", "previous sudo rule restored")
     check((try? String(contentsOfFile: T + "/etcwg/a.conf", encoding: .utf8))?.contains("OLD") == true && !ex("/etcwg/b.conf"), "overwritten config restored, new config removed")
+    // 4. an install was killed half-way (leftover .old / .wgtoggle-bak); the next attempt recovers first,
+    //    and if that attempt fails too, the original state is what comes back
+    try? fm.removeItem(atPath: T + "/H.old"); try! fm.moveItem(atPath: T + "/H", toPath: T + "/H.old")
+    try! fm.createDirectory(atPath: T + "/H", withIntermediateDirectories: true)   // half-installed junk
+    try! "old rule".write(toFile: T + "/sudoers.old", atomically: true, encoding: .utf8)
+    try! "junk rule".write(toFile: T + "/sudoers", atomically: true, encoding: .utf8)
+    try! fm.moveItem(atPath: T + "/etcwg/a.conf", toPath: T + "/etcwg/a.conf.wgtoggle-bak")
+    try! "junk".write(toFile: T + "/etcwg/a.conf", atomically: true, encoding: .utf8)
+    check(run(script(breakCheck: true)) != 0, "install after an interrupted one fails as injected")
+    check(ex("/H/previous") && !ex("/H.old") && (try? String(contentsOfFile: T + "/sudoers", encoding: .utf8)) == "old rule"
+          && (try? String(contentsOfFile: T + "/etcwg/a.conf", encoding: .utf8))?.contains("OLD") == true && !ex("/etcwg/a.conf.wgtoggle-bak"),
+          "interrupted install recovered to the original state")
+    check(run(script()) == 0 && ex("/H/wgtoggle-helper") && !ex("/H/previous"), "next install then succeeds")
     try? fm.removeItem(atPath: T)
 }
 
@@ -150,16 +167,20 @@ do {
     let R = base + "/resolver", M = base + "/markers", W = base + "/run"
     try! FileManager.default.createDirectory(atPath: W, withIntermediateDirectories: true)
     func hooks(_ ns: String) -> [String] { SplitDNS.hooks(domain: "corp", nameservers: "nameserver \(ns)\\n", resolverDir: R, markerDir: M, runDir: W) }
+    var names: [String: String] = ["utun10": "dev", "utun11": "prod"]
     func run(_ hs: [String], _ prefix: String, _ iface: String) {
         for h in hs where h.hasPrefix(prefix) {   // wg-quick runs each hook line in its own subshell
-            let cmd = h.split(separator: "=", maxSplits: 1)[1].trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "%i", with: iface)
+            let cmd = h.split(separator: "=", maxSplits: 1)[1].trimmingCharacters(in: .whitespaces)
+                .replacingOccurrences(of: "%i", with: iface).replacingOccurrences(of: "%I", with: names[iface]!)
             let p = Process(); p.executableURL = URL(fileURLWithPath: "/bin/bash"); p.arguments = ["-c", "(eval \"$1\")", "_", cmd]
             try! p.run(); p.waitUntilExit()
         }
     }
     var socks: [String: Int32] = [:]
-    func sock(_ iface: String, alive: Bool) {   // stands in for wireguard-go's control socket
+    func sock(_ iface: String, alive: Bool) {   // stands in for wireguard-go's socket + wg-quick's name file
         let path = "\(W)/\(iface).sock"
+        let nameFile = "\(W)/\(names[iface]!).name"
+        if alive { try! "\(iface)\n".write(toFile: nameFile, atomically: true, encoding: .utf8) } else { unlink(nameFile) }
         if alive {
             let fd = socket(AF_UNIX, SOCK_STREAM, 0)
             var addr = sockaddr_un(); addr.sun_family = sa_family_t(AF_UNIX)
@@ -204,6 +225,18 @@ do {
     repair()
     check(content().contains("10.10.0.53"), "repair: resolver rebuilt from the tunnel still running")
     down(dev, "utun10")
+    repair(); let once = content(); repair()
+    check(content() == once, "repair twice changes nothing")
+
+    // reboot: everything in /var/run is gone, the persistent prod marker for utun11 survives.
+    // Then a different VPN ("lab") gets utun11. Its socket must not keep prod's resolver alive.
+    try? fm.removeItem(atPath: resolver)
+    up(prod, "utun11")
+    sock("utun11", alive: false)                       // "reboot"
+    names["utun11"] = "lab"; sock("utun11", alive: true)  // another tunnel reuses utun11
+    repair()
+    check(!fm.fileExists(atPath: resolver), "reused utun name doesn't keep a dead tunnel's resolver")
+    sock("utun11", alive: false); names["utun11"] = "prod"
     let hooks = dev
     let x = "[Interface]\n" + hooks.joined(separator: "\n").replacingOccurrences(of: M, with: SplitDNS.markerDir)
     check(conflicts(name: "a", conf: x, others: [(name: "b", conf: x)]).isEmpty, "no shared-DNS warning when both coordinate")

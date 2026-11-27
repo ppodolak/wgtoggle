@@ -163,7 +163,7 @@ Several tunnels work side by side when they meet these conditions:
 
    With this, only `*.corp` names go to the VPN's DNS. Everything else keeps using your normal DNS.
 
-   When WGToggle converts a config for you, the hooks it writes also handle **two tunnels sharing a domain**: each running tunnel keeps its own nameservers in a marker in `/var/db/wgtoggle-dns/` (kept across reboots, so a resolver left behind by a crash is never mistaken for someone else's file). When one disconnects, the resolver is rebuilt from the newest tunnel still running (so it never points at the DNS of a tunnel that's gone), and when the last one disconnects, a resolver file that existed before is put back, otherwise it's removed. Markers of crashed tunnels are ignored. After a crash or reboot, `wgtoggle dns repair` (and the app at launch, in passwordless mode) removes resolvers of tunnels that aren't running and restores the original.
+   When WGToggle converts a config for you, the hooks it writes also handle **two tunnels sharing a domain**: each running tunnel keeps its own nameservers in a marker in `/var/db/wgtoggle-dns/` (kept across reboots, so a resolver left behind by a crash is never mistaken for someone else's file). When one disconnects, the resolver is rebuilt from the newest tunnel still running (so it never points at the DNS of a tunnel that's gone), and when the last one disconnects, a resolver file that existed before is put back, otherwise it's removed. Markers are tied to the tunnel *and* its interface (checked against wg-quick's runtime file), so a dead tunnel's marker is ignored even if another VPN later gets the same `utunN`. After a crash or reboot, `wgtoggle dns repair` (and the app at launch, in passwordless mode) removes resolvers of tunnels that aren't running and restores the original.
 
    > Use `ping`, `curl` or `dscacheutil -q host -a name host.corp` to test. `dig` and `nslookup` skip `/etc/resolver` and will wrongly say the name doesn't exist.
 
@@ -176,6 +176,7 @@ The Homebrew cask also installs `wgtoggle`:
 ```bash
 wgtoggle list                  # tunnels and whether they're up
 wgtoggle status --json         # state, interface, IP, traffic, last handshake
+wgtoggle status --strict       # same, but exit 4 if any tunnel's state is unknown (for monitoring)
 wgtoggle up dev prod           # connect
 wgtoggle down prod             # disconnect
 wgtoggle profile work          # connect exactly the tunnels in a saved profile
@@ -189,7 +190,7 @@ wgtoggle diagnose              # status plus settings, no keys printed
 
 Exit codes: `0` ok, `1` failed or problems found (handy in scripts: `wgtoggle conflicts || exit 1`), `2` usage error, `3` profile switch failed and restoring the previous tunnels also failed, `4` incomplete (`conflicts` couldn't read some configs; it names them).
 
-`wgtoggle profile NAME` switches under one lock, checks the result and, if the switch fails, restores the tunnels that were up before. JSON output (`status --json`, `routes --json`) has a `"version"` field that changes only if fields are removed or renamed.
+`wgtoggle profile NAME` is a transaction: it changes nothing if any tunnel's state is unknown, switches under one lock, checks the result, and if the switch fails, restores the tunnels that were up before and checks that too. JSON output (`status --json`, `routes --json`) has a `"version"` field that changes only if fields are removed or renamed.
 
 Tab completion for zsh, bash and fish is installed by the cask (commands, tunnel names, profiles). Without Homebrew, source the files in `WGToggle.app/Contents/Resources/completions/`.
 

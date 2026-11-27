@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 1.11.0 - 2026-11-27
+
+### Added
+- `wgtoggle status --strict`: exit 4 if any tunnel's state can't be determined.
+- An install that was interrupted (power loss, killed) is recovered automatically by the next one.
+
+### Changed
+- Split-DNS markers record the tunnel name as well as its `utun`, and are checked against wg-quick's runtime file. A reused `utun` after a reboot no longer keeps a dead tunnel's resolver.
+- `wgtoggle profile` refuses to start when a tunnel's state is unknown, and verifies the rollback with the same rules.
+- Passwordless helper v5: status output ends with a completeness marker; incomplete or garbled output means "unknown" instead of partial data.
+- Rollback keeps restoring the remaining parts even if one step fails.
+
+### Fixed
+- Two configs with the same interface address could be mixed up; without the helper they now show "unknown".
+
 ## 1.10.0 - 2026-11-27
 
 ### Added
