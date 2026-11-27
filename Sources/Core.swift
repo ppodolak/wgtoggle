@@ -318,13 +318,59 @@ func wgQuick(_ verb: String, _ path: String) -> String {
 }
 
 @discardableResult
-func runAsAdmin(_ command: String) throws -> String {
+func runAsAdmin(_ command: String, timeout: TimeInterval = 300) throws -> String {
     // Homebrew's tools are user-writable; prefer the root-owned copies from passwordless mode when present.
     // System directories FIRST: as root, `cp`, `install`, `shasum`… must never resolve to a user-writable
     // Homebrew file. The WireGuard tools come last (only `wg`/`wireguard-go` live there), and wg-quick itself
     // is always started by absolute path (see wgQuick()).
     let full = "export PATH=/usr/bin:/bin:/usr/sbin:/sbin:\(toolsDir() ?? "/nonexistent"); \(command) 2>&1"
-    let escaped = full.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+    // On the main thread (short reads like `cat`): run directly.
+    if Thread.isMainThread { return try appleScriptAdmin(full) }
+
+    // Off the main thread: the password dialog must be shown from main, but the work must not run there
+    // (an install takes seconds and would freeze the app). So main only asks for the password and starts a
+    // detached root job; this thread then waits for its result file.
+    // Results live in a fresh root-owned 0711 dir in /tmp with an unguessable output file name, so other
+    // users can't read the output and nothing running as this user can redirect root's writes.
+    let launcher = detachedLauncher(full)
+    var launched: Result<String, Error>!
+    DispatchQueue.main.sync { launched = Result { try appleScriptAdmin(launcher) } }
+    let parts = try launched.get().trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ").map(String.init)
+    guard parts.count == 2, parts[0].hasPrefix("/tmp/wgtoggle."), parts[1].hasPrefix(parts[0] + "/o.") else {
+        throw NSError(domain: "WGToggle", code: 1, userInfo: [NSLocalizedDescriptionKey: "couldn't start the admin command"])
+    }
+    let rcPath = parts[0] + "/rc", deadline = Date().addingTimeInterval(timeout)
+    while !FileManager.default.fileExists(atPath: rcPath) {
+        if Date() > deadline {
+            throw NSError(domain: "WGToggle", code: -2, userInfo: [NSLocalizedDescriptionKey: "admin command still running after \(Int(timeout))s"])
+        }
+        Thread.sleep(forTimeInterval: 0.2)
+    }
+    let out = (try? String(contentsOfFile: parts[1], encoding: .utf8)) ?? ""
+    let rc = Int(((try? String(contentsOfFile: rcPath, encoding: .utf8)) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)) ?? 1
+    guard rc == 0 else {
+        throw NSError(domain: "WGToggle", code: rc, userInfo: [NSLocalizedDescriptionKey: out.isEmpty ? "admin command failed (exit \(rc))" : out])
+    }
+    return out
+}
+
+/// Shell that starts `full` in the background and immediately prints "<dir> <output file>"; the job writes
+/// its exit code to <dir>/rc when done.
+func detachedLauncher(_ full: String) -> String {
+    """
+    find /tmp -maxdepth 1 -name 'wgtoggle.*' -user root -mmin +120 -exec rm -rf {} + 2>/dev/null
+    D=$(/usr/bin/mktemp -d /tmp/wgtoggle.XXXXXXXX) || exit 1
+    /bin/chmod 711 "$D"
+    O=$(/usr/bin/mktemp "$D/o.XXXXXXXXXXXX") && /bin/chmod 644 "$O"
+    ( ( \(full) ) > "$O" 2>&1; echo $? > "$D/rc.tmp"; /bin/chmod 644 "$D/rc.tmp"; /bin/mv "$D/rc.tmp" "$D/rc" ) > /dev/null 2>&1 < /dev/null &
+    echo "$D $O"
+    """
+}
+
+/// `do shell script … with administrator privileges`. Must run on the main thread (that's where macOS shows
+/// the dialog; elsewhere it fails with "Authorization failed").
+private func appleScriptAdmin(_ shell: String) throws -> String {
+    let escaped = shell.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
     let script = NSAppleScript(source: "do shell script \"\(escaped)\" with administrator privileges")!
     var error: NSDictionary?
     let out = script.executeAndReturnError(&error)

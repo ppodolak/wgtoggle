@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.12.2 - 2026-11-27
+
+### Fixed
+- The app froze (spinning cursor) while an admin action ran after the password prompt, most noticeably when updating the passwordless helper. The main thread now only shows the password dialog; the work runs as a detached root job and the app waits for its result in the background, so the menu and icon stay responsive.
+
 ## 1.12.1 - 2026-11-27
 
 ### Fixed

@@ -91,9 +91,10 @@ extension AppDelegate {
         }
         busy = status ?? "Working…"
         startBlink()
-        CATransaction.flush()   // commit the pulse animation before main may block on the dialog
-        let queue = needsPrompt ? DispatchQueue.main : adminQueue
-        queue.async {
+        CATransaction.flush()   // commit the pulse animation before main shows the password dialog
+        // Always off the main thread: runAsAdmin shows its dialog on main and waits for the root job here,
+        // so the menu and icon stay responsive while an install or wg-quick runs.
+        adminQueue.async {
             var failure: String?
             var cancelled = false
             do {

@@ -167,6 +167,26 @@ let timedOut = (try? Helper.run(["status"], timeout: 1, command: ["/bin/sleep", 
 check(timedOut && Date().timeIntervalSince(started) < 5, "a hanging helper call gives up after its timeout (\(String(format: "%.1f", Date().timeIntervalSince(started)))s)")
 check((try? Helper.run(["x"], timeout: 5, command: ["/bin/echo", "hi"])) == "hi\n", "normal call returns its output")
 
+print("detached admin job")
+do {
+    func launch(_ cmd: String) -> (out: String, secs: Double) {
+        let start = Date(), p = Process(), pipe = Pipe()
+        p.executableURL = URL(fileURLWithPath: "/bin/bash"); p.arguments = ["-c", detachedLauncher(cmd)]; p.standardOutput = pipe
+        try! p.run()
+        let out = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        p.waitUntilExit()
+        return (out.trimmingCharacters(in: .whitespacesAndNewlines), Date().timeIntervalSince(start))
+    }
+    let (out, secs) = launch("sleep 2; echo done; exit 3")
+    let parts = out.split(separator: " ").map(String.init)
+    check(secs < 1 && parts.count == 2 && parts[1].hasPrefix(parts[0] + "/o."), "launcher returns at once with its paths (\(String(format: "%.2f", secs))s)")
+    check(!FileManager.default.fileExists(atPath: parts[0] + "/rc"), "job still running in the background")
+    Thread.sleep(forTimeInterval: 2.5)
+    check((try? String(contentsOfFile: parts[0] + "/rc", encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) == "3"
+          && (try? String(contentsOfFile: parts[1], encoding: .utf8)) == "done\n", "job's exit code and output are collected")
+    try? FileManager.default.removeItem(atPath: parts[0])
+}
+
 print("restart backoff")
 let now = Date()
 check(restartDelay(previous: [], now: now) == 10, "first restart after 10s")
