@@ -2,7 +2,9 @@
 
 <h1 align="center">WGToggle</h1>
 
-A small native macOS menu bar app for running **several WireGuard tunnels at the same time** with `wg-quick`. Turn tunnels on one at a time or all together, see live traffic, catch stuck tunnels, and add new ones without opening a terminal.
+<p align="center"><b>Multiple WireGuard VPNs. One macOS menu bar.</b></p>
+
+Run several WireGuard tunnels at the same time on macOS. Keep your development, production and private networks connected side by side and manage them from the menu bar: toggle one or all, see live traffic, catch stuck tunnels, and add new configs without opening a terminal.
 
 ```bash
 brew install --cask ppodolak/tap/wgtoggle
@@ -26,13 +28,16 @@ brew install --cask ppodolak/tap/wgtoggle
 - [Features](#features)
 - [Install](#install)
 - [Usage](#usage)
+- [Why WGToggle](#why-wgtoggle)
 - [Running multiple tunnels](#running-multiple-tunnels)
 - [Logs](#logs)
 - [Passwordless mode](#passwordless-mode)
 - [Security](#security)
+- [Privacy](#privacy)
 - [Build from source](#build-from-source)
 - [Project layout](#project-layout)
 - [Troubleshooting](#troubleshooting)
+- [Roadmap](#roadmap)
 - [Support](#support)
 
 ---
@@ -108,6 +113,22 @@ Click the shield in the menu bar:
 - The tunnel name is the file name. wg-quick only accepts names of up to **15 characters** (`A–Z a–z 0–9 _ = + . -`). When importing, you'll be asked to rename anything longer.
 - Connecting or disconnecting shows the standard macOS admin password dialog unless passwordless mode is on.
 - `WGToggle.app/Contents/MacOS/WGToggle --diagnose` prints each tunnel's state, interface, IP, traffic and health. Handy for bug reports; no keys are printed.
+
+## Why WGToggle
+
+The official WireGuard app for macOS is great when you need one tunnel at a time. WGToggle is for people who work across several private networks at once, like a dev VPN, a prod VPN and a home lab.
+
+| | WGToggle | Official WireGuard app |
+|---|---|---|
+| Several tunnels up at the same time | Yes | One at a time |
+| Uses your existing `wg-quick` configs, including `PostUp`/`PostDown` hooks | Yes | Imports configs, no hooks |
+| Split DNS per domain (`/etc/resolver`) | Yes, can convert on import | No |
+| Overlap and DNS conflict warnings | Yes | No |
+| Stuck tunnel detection | Yes | No |
+| Signed, notarized, sandboxed, App Store | Not yet (ad-hoc signed) | Yes |
+| Needs Homebrew and admin rights | Yes | No |
+
+If you only ever use one tunnel, the official app is the simpler and more locked-down choice.
 
 ## Running multiple tunnels
 
@@ -199,6 +220,13 @@ A config is a secret (it holds your private key), and it's also code (wg-quick r
 - Read the hook dialog. Your own split-DNS hook should be just `mkdir`/`printf`/`rm` on `/etc/resolver/<domain>`.
 - For stricter isolation, keep configs in root-owned `/etc/wireguard` (`sudo install -m 600 x.conf /etc/wireguard/`).
 
+## Privacy
+
+- No accounts, no analytics, no telemetry.
+- Your configs and keys never leave your Mac. QR codes are decoded locally.
+- Logs stay in `~/Library/Logs/WGToggle/` (readable only by you) and never contain keys.
+- The only network request the app makes on its own is the update check: a plain request to `api.github.com` for the latest release, with no identifiers. Turn it off in **Settings → Check for Updates Automatically**.
+
 ## Build from source
 
 ```bash
@@ -252,6 +280,18 @@ WGToggle/
 | A private hostname doesn't resolve but the tunnel works | Your router may block public names that point to private IPs (DNS rebinding protection). Add a hook that sends that domain to another DNS server, e.g. `PostUp = mkdir -p /etc/resolver && printf 'nameserver 1.1.1.1\n' > /etc/resolver/example.com` and `PostDown = rm -f /etc/resolver/example.com`. |
 | Tunnel shows a ⚠︎ stuck warning | Traffic goes out but nothing comes back. Check whether the same config is active on another device, or turn on **Settings → Restart Stuck Tunnels Automatically**. |
 | Something else | Menu → **Log Explorer…**, or run `--diagnose`. |
+
+## Roadmap
+
+Ideas being considered, roughly in order. Suggestions welcome in [issues](https://github.com/ppodolak/wgtoggle/issues).
+
+- [ ] Configurable health checks per tunnel (ping or HTTP to an internal host)
+- [ ] Command line tool: `wgtoggle status --json`, `up`, `down`, `profile`
+- [ ] Route view: which networks each tunnel handles, conflicts highlighted before connecting
+- [ ] IPv6 overlap and `::/0` checks
+- [ ] Profiles by Wi-Fi network
+- [ ] Traffic history per tunnel
+- [ ] Developer ID signing and notarization, then a proper privileged helper (SMAppService + XPC) instead of sudo
 
 ## Support
 
