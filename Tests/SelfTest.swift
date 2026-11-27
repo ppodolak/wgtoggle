@@ -52,6 +52,23 @@ check(SplitDNS.plan("[Interface]\nPrivateKey = A\n") == nil, "no DNS line -> no 
 let evil = "[Interface]\nDNS = 10.0.0.1, x;rm -rf /, a$(id)\n"
 check(SplitDNS.plan(evil)!.domains.isEmpty, "shell metacharacters never become domains")
 
+print("conflicts")
+let a = "[Interface]\nPostUp = printf x > /etc/resolver/corp\n[Peer]\nAllowedIPs = 10.0.0.0/16, ::/0, 10.0.0.0/40\n"
+let b = "[Interface]\nPostUp = printf y > /etc/resolver/corp\n[Peer]\nAllowedIPs = 10.0.5.0/24\n"
+let found = conflicts(name: "a", conf: a, others: [(name: "b", conf: b)])
+check(found.contains { $0.contains("10.0.0.0/16 overlaps b: 10.0.5.0/24") }, "route overlap reported")
+check(found.contains { $0.contains("::/0 sends ALL IPv6") }, "IPv6 default route reported")
+check(found.contains { $0.contains("10.0.0.0/40 is not a valid network") }, "invalid entry reported")
+check(found.contains { $0.contains("split DNS for corp") }, "shared resolver domain reported")
+check(conflicts(name: "b", conf: b, others: []).isEmpty, "clean config has no conflicts")
+
+print("restart backoff")
+let now = Date()
+check(restartDelay(previous: [], now: now) == 10, "first restart after 10s")
+check(restartDelay(previous: [now.addingTimeInterval(-60), now.addingTimeInterval(-30)], now: now) == 40, "third restart after 40s")
+check(restartDelay(previous: [now, now, now].map { $0.addingTimeInterval(-60) }, now: now) == nil, "gives up after 3 in 15 min")
+check(restartDelay(previous: [now, now, now].map { $0.addingTimeInterval(-16 * 60) }, now: now) == 10, "resets after 15 min")
+
 print("cli")
 check(CLI.run(["bogus"]) == 2 && CLI.run(["up"]) == 2 && CLI.run(["up", "no-such-tunnel"]) == 2, "cli rejects bad input")
 
@@ -98,6 +115,11 @@ check(runHelper(["up", "x;id"]) == 2, "helper rejects shell metacharacters")
 check(runHelper(["up", "nosuchtunnel"]) == 2, "helper rejects missing config")
 check(runHelper(["up", "a", "extra"]) == 2, "helper rejects extra args")
 check(runHelper(["rm", "-rf"]) == 2, "helper rejects unknown command")
+check(runHelper(["meta", "../../etc/passwd"]) == 2 && runHelper(["meta", "nosuchtunnel"]) == 2, "helper meta validates names")
+check(runHelper(["version"]) == 0, "helper version command")
+let metaGrep = Helper.script.split(separator: "\n").first { $0.contains("grep -iE") && $0.contains("AllowedIPs") } ?? ""
+check(!metaGrep.isEmpty && !metaGrep.contains("Key"), "helper meta only selects key-free lines")
+check(Helper.script.contains("[[ -S \"/var/run/wireguard/$i.sock\" ]] || continue"), "helper status skips stale name files")
 
 print(failures == 0 ? "\nALL PASSED" : "\n\(failures) FAILED")
 exit(failures == 0 ? 0 : 1)

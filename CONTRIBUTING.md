@@ -36,7 +36,10 @@ There's no Xcode project. The app is plain Swift compiled with `swiftc`:
 
 | File | What's in it |
 |---|---|
-| `Sources/main.swift` | menu, tunnels, import, hook approval, logging |
+| `Sources/main.swift` | entry point: app or command line |
+| `Sources/AppDelegate.swift` | menu bar UI, import/edit, settings |
+| `Sources/Core.swift` | tunnels, config parsing, conflicts, hook approval, logging, admin commands |
+| `Sources/CLI.swift` | `wgtoggle` command line tool |
 | `Sources/Helper.swift` | passwordless mode |
 | `Sources/Stats.swift` | traffic counters, stuck detection |
 | `Sources/Features.swift` | split DNS, profiles, auto-connect, updates, shortcut, QR |

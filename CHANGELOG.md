@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 1.5.0 - 2026-11-27
+
+### Added
+- `wgtoggle routes`, `conflicts`, `dns` and `version`. Stable exit codes; JSON output now has a `version` field.
+- Conflict checks also cover root-owned configs in passwordless mode (via a key-free `meta` helper command).
+- Auto-restart backoff: 10 s, 20 s, 40 s, then a 15 minute pause, so an unreachable server doesn't cause endless reconnects.
+- **Settings → Update Passwordless Helper…** when a newer helper is available.
+
+### Changed
+- Health check trusts a fresh handshake when one is known, so one-way traffic no longer looks stuck.
+- Code split into `Core.swift`, `AppDelegate.swift` and a small `main.swift`.
+
+### Fixed
+- With root-owned configs, a tunnel whose `wireguard-go` had died could be shown as up as long as any other tunnel was running. Status is now checked per tunnel, and the helper skips stale name files.
+
 ## 1.4.0 - 2026-11-27
 
 ### Added

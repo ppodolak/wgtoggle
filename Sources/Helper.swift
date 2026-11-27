@@ -38,24 +38,33 @@ enum Helper {
     DIR=/etc/wireguard
     cmd="${1:-}"; name="${2:-}"
     [[ $# -le 2 ]] || { echo "too many arguments" >&2; exit 2; }
+    check_conf() {
+      [[ "$name" =~ ^[a-zA-Z0-9_=+.-]{1,15}$ ]] || { echo "invalid tunnel name" >&2; exit 2; }
+      conf="$DIR/$name.conf"
+      [[ -f "$conf" && ! -L "$conf" ]] || { echo "no such tunnel: $conf" >&2; exit 2; }
+      [[ "$(stat -f %u "$conf")" == 0 && "$(stat -f %u "$DIR")" == 0 ]] || { echo "$conf must be owned by root" >&2; exit 2; }
+      [[ $(( 0$(stat -f %Lp "$conf") & 022 )) == 0 ]] || { echo "$conf is group/world writable" >&2; exit 2; }
+    }
     case "$cmd" in
+      version) echo 2 ;;
       up|down)
-        [[ "$name" =~ ^[a-zA-Z0-9_=+.-]{1,15}$ ]] || { echo "invalid tunnel name" >&2; exit 2; }
-        conf="$DIR/$name.conf"
-        [[ -f "$conf" && ! -L "$conf" ]] || { echo "no such tunnel: $conf" >&2; exit 2; }
-        [[ "$(stat -f %u "$conf")" == 0 && "$(stat -f %u "$DIR")" == 0 ]] || { echo "$conf must be owned by root" >&2; exit 2; }
-        [[ $(( 0$(stat -f %Lp "$conf") & 022 )) == 0 ]] || { echo "$conf is group/world writable" >&2; exit 2; }
+        check_conf
         exec "$H/bash" "$H/wg-quick" "$cmd" "$conf" ;;
+      meta)
+        # Routing/DNS/hook lines for conflict checks. Never prints PrivateKey or PresharedKey.
+        check_conf
+        grep -iE '^[[:space:]]*(\[Interface\]|\[Peer\]|Address|AllowedIPs|DNS|PreUp|PostUp|PreDown|PostDown)[[:space:]]*(=|$)' "$conf" || true ;;
       status)
         # name iface latest-handshake rx tx   (no keys are printed)
         for f in /var/run/wireguard/*.name; do
           [[ -e "$f" ]] || continue
           n=$(basename "$f" .name); i=$(cat "$f")
+          [[ -S "/var/run/wireguard/$i.sock" ]] || continue   # stale name file: wireguard-go is gone
           hs=$("$H/wg" show "$i" latest-handshakes 2>/dev/null | awk '{print $2}' | sort -n | tail -1)
           tr=$("$H/wg" show "$i" transfer 2>/dev/null | awk '{r+=$2; t+=$3} END {print r+0, t+0}')
           echo "$n $i ${hs:-0} ${tr:-0 0}"
         done ;;
-      *) echo "usage: wgtoggle-helper up|down NAME | status" >&2; exit 2 ;;
+      *) echo "usage: wgtoggle-helper up|down|meta NAME | status | version" >&2; exit 2 ;;
     esac
     """#
 
@@ -139,6 +148,34 @@ enum Helper {
         // Configs now live in /etc/wireguard; remove the user-writable copies so they can't shadow them.
         for t in movingConfigs { try? FileManager.default.removeItem(atPath: t.path) }
         return out
+    }
+
+    /// Bump when the helper script changes; older installs get an "update" prompt.
+    static let currentVersion = 2
+
+    static var installedVersion: Int {
+        guard isInstalled else { return 0 }
+        return Int((try? run(["version"]))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") ?? 1
+    }
+
+    static var needsUpdate: Bool { isInstalled && installedVersion < currentVersion }
+
+    /// Config text without keys, for root-only configs (conflict checks). nil if unavailable.
+    static func meta(_ name: String) -> String? {
+        guard isInstalled, installedVersion >= 2 else { return nil }
+        return try? run(["meta", name])
+    }
+
+    private static let lock = NSLock()
+    private static var cache: (Date, [String: Status])?
+
+    /// `status()` is a sudo call; `isUp` is asked many times per second while the menu is open.
+    static func cachedStatus() -> [String: Status] {
+        lock.lock(); defer { lock.unlock() }
+        if let (at, s) = cache, Date().timeIntervalSince(at) < 2 { return s }
+        let s = status()
+        cache = (Date(), s)
+        return s
     }
 
     static func uninstall() throws {

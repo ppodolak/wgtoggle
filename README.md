@@ -58,7 +58,7 @@ brew install --cask ppodolak/tap/wgtoggle
 - Notifications: a banner on connect, on disconnect (including changes made in a terminal) and on errors. Click an error to open the Log Explorer. Can be turned off in the menu.
 - Log Explorer: a native window with search, Info/Warn/Error filters, a tunnel filter, live updates, a detail pane, and copy/export/clear (**⌘L**).
 - Live stats: each tunnel shows traffic, last handshake and its IP. Hold ⌥ to copy the IP.
-- Health check: if traffic goes out but nothing comes back, the tunnel is marked stuck, you get a notification, and it can be restarted automatically.
+- Health check: a tunnel is marked stuck when its handshake goes stale while traffic is flowing (passwordless mode), or when traffic goes out and nothing comes back. You get a notification, and it can be restarted automatically: after 10 s, 20 s and 40 s, then it gives up for 15 minutes.
 - Passwordless mode: optional. Connect and disconnect without typing your password (see [Passwordless mode](#passwordless-mode)).
 - Split DNS on import: a config with `DNS = …, corp` can be converted so only `*.corp` lookups use the VPN's DNS.
 - Auto-connect: per tunnel, at launch. With passwordless mode also after wake, after network changes and when a tunnel drops.
@@ -177,8 +177,14 @@ wgtoggle status --json         # state, interface, IP, traffic, last handshake
 wgtoggle up dev prod           # connect
 wgtoggle down prod             # disconnect
 wgtoggle profile work          # connect exactly the tunnels in a saved profile
+wgtoggle routes                # networks each tunnel routes through the VPN
+wgtoggle conflicts             # overlapping routes, default routes, shared DNS domains
+wgtoggle dns                   # active split-DNS resolvers
+wgtoggle version               # app, wireguard-tools and helper versions
 wgtoggle diagnose              # status plus settings, no keys printed
 ```
+
+Exit codes: `0` ok, `1` failed or problems found (handy in scripts: `wgtoggle conflicts || exit 1`), `2` usage error. JSON output (`status --json`, `routes --json`) has a `"version"` field that changes only if fields are removed or renamed.
 
 It shares settings with the app. Connecting asks for your password in the terminal unless passwordless mode is on, and configs with hooks must be approved in the app first.
 
@@ -225,7 +231,9 @@ Homebrew's `wg-quick`, `wg`, `wireguard-go` and `bash` are writable by your user
 - The helper only accepts `up NAME`, `down NAME` and `status`, checks the name, and only runs configs in `/etc/wireguard/` that are owned by root and not writable by anyone else.
 - Your configs are moved into `/etc/wireguard/`. Adding, editing or removing a tunnel still asks for your password.
 
-Turn it on again after `brew upgrade wireguard-tools` to pick up the new versions. Turning it off removes the helper and the sudoers rule; configs stay in `/etc/wireguard/`.
+When a WGToggle update ships a newer helper, **Settings** shows **Update Passwordless Helper…** (one password prompt). Use it too after `brew upgrade wireguard-tools` to pick up the new tool versions.
+
+The helper also lets the app check root-owned configs for conflicts: `meta NAME` returns only the `Address`, `AllowedIPs`, `DNS` and hook lines, never keys. Turning it off removes the helper and the sudoers rule; configs stay in `/etc/wireguard/`.
 
 ## Security
 
@@ -283,7 +291,10 @@ WGToggle/
 ├── README.md
 ├── build.sh                  # build, sign, package
 ├── Sources/
-│   ├── main.swift            # menu bar app, tunnels, import, security checks, logging
+│   ├── main.swift            # entry point (app or command line)
+│   ├── AppDelegate.swift     # menu bar UI, import/edit, settings
+│   ├── Core.swift            # tunnels, config parsing, conflicts, hook approval, logging, admin commands
+│   ├── CLI.swift             # wgtoggle command line tool
 │   ├── LogExplorer.swift     # SwiftUI log window
 │   ├── Notify.swift          # connect/disconnect/error notifications
 │   ├── Helper.swift          # passwordless mode (helper, sudoers rule, installer)
@@ -318,7 +329,10 @@ Ideas being considered, roughly in order. Suggestions welcome in [issues](https:
 
 - [ ] Configurable health checks per tunnel (ping or HTTP to an internal host)
 - [x] Command line tool: `wgtoggle status --json`, `up`, `down`, `profile`
-- [ ] Route view: which networks each tunnel handles, conflicts highlighted before connecting
+- [x] Route and conflict view on the command line (`wgtoggle routes`, `wgtoggle conflicts`)
+- [ ] Route view in the app, conflicts highlighted before connecting
+- [ ] Split DNS managed by the helper with ownership tracking, so two tunnels can share a domain
+- [ ] Install the root-owned tool copies without enabling passwordless mode
 - [x] IPv6 overlap and `::/0` checks
 - [ ] Profiles by Wi-Fi network
 - [ ] Traffic history per tunnel

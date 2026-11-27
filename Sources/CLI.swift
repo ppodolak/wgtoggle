@@ -12,7 +12,14 @@ enum CLI {
           up NAME...            connect tunnels
           down NAME...          disconnect tunnels
           profile NAME          connect exactly the tunnels in a saved profile
+          routes [--json]       networks each tunnel sends through the VPN
+          conflicts             overlapping routes, default routes, shared DNS domains
+          dns                   active split-DNS resolvers (/etc/resolver)
+          version               app and wireguard-tools versions
           diagnose              status plus app settings (no keys are printed)
+
+        Exit codes: 0 ok, 1 failed or problems found, 2 usage error.
+        JSON output has a "version" field; it changes only when fields are removed or renamed.
 
         Connecting asks for your password unless passwordless mode is on.
         Configs with hooks must be approved in the app first.
@@ -42,6 +49,43 @@ enum CLI {
             if !down.isEmpty { rc = setState(down, up: false) }
             if !up.isEmpty, rc == 0 { rc = setState(up, up: true) }
             return rc
+        case "routes":
+            let rows = listTunnels().map { t in (t, configText(t).map(allowedIPs) ?? []) }
+            if rest.contains("--json") {
+                return printJSON(["tunnels": rows.map { ["name": $0.0.name, "up": $0.0.isUp, "allowedIPs": $0.1] }])
+            }
+            for (t, r) in rows { print("\(t.isUp ? "up  " : "down")  \(t.name.padding(toLength: 16, withPad: " ", startingAt: 0)) \(r.isEmpty ? "(config not readable)" : r.joined(separator: ", "))") }
+            return 0
+        case "conflicts":
+            let all = listTunnels().compactMap { t in configText(t).map { (name: t.name, conf: $0) } }
+            var found: [String] = []
+            for (i, t) in all.enumerated() {
+                // Each pair once: compare with later tunnels only; per-tunnel checks run for every tunnel.
+                found += conflicts(name: t.name, conf: t.conf, others: Array(all[(i + 1)...]))
+            }
+            found.forEach { print($0) }
+            if found.isEmpty { print("no conflicts between \(all.count) tunnels") }
+            return found.isEmpty ? 0 : 1
+        case "dns":
+            let dir = "/etc/resolver"
+            let files = ((try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []).sorted()
+            if files.isEmpty { print("no split-DNS resolvers in \(dir)") }
+            for f in files {
+                let ns = ((try? String(contentsOfFile: "\(dir)/\(f)", encoding: .utf8)) ?? "")
+                    .split(separator: "\n").filter { $0.hasPrefix("nameserver") }.map { $0.dropFirst(11) }
+                print("\(f.padding(toLength: 24, withPad: " ", startingAt: 0)) \(ns.joined(separator: ", "))")
+            }
+            return 0
+        case "version":
+            print("WGToggle \(Updates.current)")
+            if let wg = findBinary("wg") {
+                let p = Process(); let pipe = Pipe()
+                p.executableURL = URL(fileURLWithPath: wg); p.arguments = ["--version"]; p.standardOutput = pipe
+                try? p.run(); p.waitUntilExit()
+                print(String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self).split(separator: " ").prefix(2).joined(separator: " "))
+            } else { print("wireguard-tools not installed") }
+            print("passwordless helper: \(Helper.isInstalled ? "v\(Helper.installedVersion)\(Helper.needsUpdate ? " (update available in the app)" : "")" : "not installed")")
+            return 0
         case "diagnose":
             print("WGToggle \(Updates.current)  passwordless: \(Helper.isInstalled ? "on" : "off")  config dir: \(preferredConfigDir)")
             print("auto-connect: \(AutoConnect.tunnels.sorted().joined(separator: ", "))  profiles: \(Profiles.all.keys.sorted().joined(separator: ", "))")
@@ -69,9 +113,7 @@ enum CLI {
                 }
                 return d
             }
-            let data = try! JSONSerialization.data(withJSONObject: items, options: [.prettyPrinted, .sortedKeys])
-            print(String(decoding: data, as: UTF8.self))
-            return 0
+            return printJSON(["tunnels": items])
         }
         for t in tunnels {
             var line = "\(t.isUp ? "up  " : "down")  \(t.name.padding(toLength: 16, withPad: " ", startingAt: 0))"
@@ -81,6 +123,15 @@ enum CLI {
             }
             print(line)
         }
+        return 0
+    }
+
+    /// Every JSON document carries a schema version.
+    static func printJSON(_ body: [String: Any]) -> Int32 {
+        var doc = body
+        doc["version"] = 1
+        let data = try! JSONSerialization.data(withJSONObject: doc, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+        print(String(decoding: data, as: UTF8.self))
         return 0
     }
 

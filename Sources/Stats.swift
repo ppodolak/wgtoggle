@@ -87,7 +87,7 @@ final class HealthMonitor {
     /// Called every few seconds off the main thread.
     func sample(tunnels: [Tunnel]) -> (stats: [String: TunnelStats], newlyStuck: [String]) {
         let table = interfaceTable()
-        let helper = Helper.status()
+        let helper = Helper.cachedStatus()
         let now = Date()
         var newStats: [String: TunnelStats] = [:]
         var newlyStuck: [String] = []
@@ -115,9 +115,13 @@ final class HealthMonitor {
             if let oldest = hist.first, now.timeIntervalSince(oldest.0) >= Self.window {
                 let rxDelta = s.rx - oldest.1, txDelta = s.tx - oldest.2
                 // Data leaves but (almost) nothing comes back: only handshake-sized replies.
-                let silent = txDelta > 2_000 && rxDelta < 400
-                let staleHandshake = s.handshake.map { now.timeIntervalSince($0) > Self.handshakeLimit && txDelta > 2_000 } ?? false
-                s.stuck = silent || staleHandshake
+                // With a handshake time (passwordless mode) trust it: a fresh handshake means the peer is alive,
+                // even if traffic is one-way. Without it, fall back to "data out, nothing back".
+                if let h = s.handshake {
+                    s.stuck = now.timeIntervalSince(h) > Self.handshakeLimit && txDelta > 2_000
+                } else {
+                    s.stuck = txDelta > 2_000 && rxDelta < 400
+                }
             }
             if s.stuck && !notifiedStuck.contains(t.name) { newlyStuck.append(t.name); notifiedStuck.insert(t.name) }
             if !s.stuck { notifiedStuck.remove(t.name) }
@@ -138,4 +142,10 @@ func formatAgo(_ d: Date) -> String {
     if s < 60 { return "\(s)s ago" }
     if s < 3600 { return "\(s / 60)m ago" }
     return "\(s / 3600)h ago"
+}
+
+/// Auto-restart backoff: 10s, 20s, 40s, then give up until 15 minutes pass. nil = don't restart.
+func restartDelay(previous: [Date], now: Date = Date()) -> TimeInterval? {
+    let recent = previous.filter { now.timeIntervalSince($0) < 15 * 60 }
+    return recent.count >= 3 ? nil : 10 * pow(2, Double(recent.count))
 }
