@@ -143,7 +143,7 @@ extension AppDelegate {
         guard confirm("Delete tunnel \(t.name)?\n\(path)", button: "Delete") else { return }
         Log.info("remove: \(t.name) (\(path))")
         var cmd = ""
-        if t.isUp { cmd = "wg-quick down \(shellQuote(path)); " }
+        if t.isUp { cmd = wgQuick("down", path) + "; " }
         if t.isUp || (try? FileManager.default.removeItem(atPath: path)) == nil {
             run(cmd + "rm -f \(shellQuote(path))", what: "remove \(t.name)")
         }

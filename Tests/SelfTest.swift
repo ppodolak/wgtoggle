@@ -88,6 +88,52 @@ check(!red.contains(key) && !red.contains("lXXJte14"), "keys never appear in the
 check(red.contains("PrivateKey = <redacted>") && red.contains("presharedkey=<redacted>") && red.contains("peer yAnz… handshake"), "redacted form is readable")
 check(Log.redact("wg-quick up wg-dev ok, 10.0.0.0/16") == "wg-quick up wg-dev ok, 10.0.0.0/16", "normal text untouched")
 
+print("installer transaction (as user, paths redirected to a temp dir)")
+if findBinary("wg-quick") == nil {
+    print("  skip (wireguard-tools not installed)")
+} else {
+    let T = NSTemporaryDirectory() + "wginst-\(UUID().uuidString.prefix(8))"
+    let fm = FileManager.default
+    try! fm.createDirectory(atPath: T + "/src", withIntermediateDirectories: true)
+    try! "[Interface]\nPrivateKey = A\n".write(toFile: T + "/src/a.conf", atomically: true, encoding: .utf8)
+    try! "[Interface]\nPrivateKey = B\n".write(toFile: T + "/src/b.conf", atomically: true, encoding: .utf8)
+    func script(breakCheck: Bool = false) -> String {
+        var x = Helper.installer(user: NSUserName(), moveFrom: [T + "/src/a.conf", T + "/src/b.conf"])
+        for (a, b) in [("/Library/PrivilegedHelperTools/wgtoggle", T + "/H"), ("/etc/sudoers.d/wgtoggle", T + "/sudoers"),
+                       ("/etc/wireguard", T + "/etcwg"), ("mkdir -p /Library/PrivilegedHelperTools", "mkdir -p " + T),
+                       ("chown -R root:wheel", ": chown"), ("chown root:wheel", ": chown"),
+                       ("install -o root -g wheel", "install")] { x = x.replacingOccurrences(of: a, with: b) }
+        if breakCheck { x = x.replacingOccurrences(of: "== \(Helper.currentVersion) ]]", with: "== 999 ]]") }
+        return x
+    }
+    func run(_ text: String) -> Int32 {
+        let f = T + "/install.sh"
+        try! text.write(toFile: f, atomically: true, encoding: .utf8)
+        let p = Process(); p.executableURL = URL(fileURLWithPath: "/bin/bash"); p.arguments = [f]
+        p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
+        try! p.run(); p.waitUntilExit(); return p.terminationStatus
+    }
+    let ex = { fm.fileExists(atPath: T + $0) }
+    // 1. first install fails at the final check: nothing may be left behind
+    check(run(script(breakCheck: true)) != 0 && !ex("/H") && !ex("/sudoers") && !ex("/etcwg/a.conf"), "failed first install leaves nothing")
+    // 2. first install succeeds
+    check(run(script()) == 0 && ex("/H/wgtoggle-helper") && ex("/sudoers") && ex("/etcwg/a.conf") && !ex("/H.old") && !ex("/sudoers.old"), "install succeeds, no backups left")
+    // 3. reinstall fails: previous helper, rule and configs restored exactly
+    try! "marker".write(toFile: T + "/H/previous", atomically: true, encoding: .utf8)
+    try! "old rule".write(toFile: T + "/sudoers", atomically: true, encoding: .utf8)
+    try! "[Interface]\nPrivateKey = OLD\n".write(toFile: T + "/etcwg/a.conf", atomically: true, encoding: .utf8)
+    try? fm.removeItem(atPath: T + "/etcwg/b.conf")
+    check(run(script(breakCheck: true)) != 0, "broken reinstall fails")
+    check(ex("/H/previous") && !ex("/H.old"), "previous helper restored")
+    check((try? String(contentsOfFile: T + "/sudoers", encoding: .utf8)) == "old rule", "previous sudo rule restored")
+    check((try? String(contentsOfFile: T + "/etcwg/a.conf", encoding: .utf8))?.contains("OLD") == true && !ex("/etcwg/b.conf"), "overwritten config restored, new config removed")
+    try? fm.removeItem(atPath: T)
+}
+
+print("privileged commands")
+let wq = wgQuick("up", "/tmp/a b.conf")
+check(wq.hasPrefix("'/") && wq.contains("/bash' '") && wq.hasSuffix("/wg-quick' up '/tmp/a b.conf'"), "wg-quick runs by absolute path with its own bash")
+
 print("restart backoff")
 let now = Date()
 check(restartDelay(previous: [], now: now) == 10, "first restart after 10s")
@@ -147,6 +193,17 @@ do {
     up(dev, "utun10"); up(prod, "utun11")
     down(dev, "utun10"); down(prod, "utun11")
     check(content() == "nameserver 192.0.2.1\n", "pre-existing resolver file restored afterwards")
+    // crash/reboot: resolver of a tunnel that's no longer running gets cleaned up by repair
+    up(dev, "utun10"); sock("utun10", alive: false)   // utun10 dies without running PostDown
+    func repair() { let p = Process(); p.executableURL = URL(fileURLWithPath: "/bin/bash")
+        p.arguments = ["-c", SplitDNS.repairScript(resolverDir: R, markerDir: M, runDir: W)]
+        p.standardOutput = FileHandle.nullDevice; try! p.run(); p.waitUntilExit() }
+    repair()
+    check(content() == "nameserver 192.0.2.1\n", "repair: dead tunnel's resolver replaced by the saved original")
+    up(dev, "utun10"); up(prod, "utun11"); sock("utun11", alive: false)
+    repair()
+    check(content().contains("10.10.0.53"), "repair: resolver rebuilt from the tunnel still running")
+    down(dev, "utun10")
     let hooks = dev
     let x = "[Interface]\n" + hooks.joined(separator: "\n").replacingOccurrences(of: M, with: SplitDNS.markerDir)
     check(conflicts(name: "a", conf: x, others: [(name: "b", conf: x)]).isEmpty, "no shared-DNS warning when both coordinate")

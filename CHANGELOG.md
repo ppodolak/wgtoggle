@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 1.10.0 - 2026-11-27
+
+### Added
+- `wgtoggle dns repair`, and automatic repair at launch in passwordless mode: resolvers left by a crashed tunnel or a reboot are rebuilt, restored or removed.
+
+### Changed
+- Root commands use system directories first in `PATH`, and `wg-quick` is always started by absolute path. A planted file in Homebrew's `bin` can't shadow `cp`, `install` or other system tools anymore.
+- Helper installation is a full transaction: any failure (including explicit exits) restores the previous helper, sudo rule and migrated or overwritten configs; a failed first install leaves nothing behind.
+- A failing passwordless helper makes tunnel state "unknown" instead of looking like everything is down.
+- Passwordless helper v4 (`dns-repair`).
+
+### Fixed
+- The installer's post-install check never aborted: macOS's bash 3.2 ignores `set -e` for a failing `[[ ]]`.
+- Profile verification could read cached state right after a change; the cache is now cleared after every connect/disconnect. Unknown tunnels make profile verification report "incomplete" (exit 4).
+
 ## 1.9.0 - 2026-11-27
 
 ### Added

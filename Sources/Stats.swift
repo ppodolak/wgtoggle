@@ -109,7 +109,7 @@ final class HealthMonitor {
     /// Called every few seconds off the main thread.
     func sample(tunnels: [Tunnel]) -> (stats: [String: TunnelStats], newlyStuck: [String], newlyStalePeers: [(String, String)]) {
         let table = interfaceTable()
-        let helper = Helper.cachedStatus()
+        let helper = Helper.cachedStatus() ?? [:]
         let now = Date()
         var newStats: [String: TunnelStats] = [:]
         var newlyStuck: [String] = []

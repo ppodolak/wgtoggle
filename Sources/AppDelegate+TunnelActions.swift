@@ -26,7 +26,7 @@ extension AppDelegate {
         // Passwordless for root-owned /etc/wireguard configs when the helper is installed.
         let viaHelper = Helper.isInstalled ? allowed.filter { $0.path.hasPrefix(Helper.configDir + "/") } : []
         let viaAdmin = allowed.filter { t in !viaHelper.contains { $0.path == t.path } }
-        let cmd = viaAdmin.map { "wg-quick \(verb) \(shellQuote($0.path))" }.joined(separator: up ? " && " : "; ")
+        let cmd = viaAdmin.map { wgQuick(verb, $0.path) }.joined(separator: up ? " && " : "; ")
         let names = allowed.map(\.name).joined(separator: ", ")
         runTask(what: "wg-quick \(verb)", status: "\(up ? "Connecting" : "Disconnecting") \(names)…", needsPrompt: !viaAdmin.isEmpty) {
             var out = ""
@@ -104,6 +104,7 @@ extension AppDelegate {
             } catch {
                 failure = error.localizedDescription
             }
+            Helper.invalidateCache()
             DispatchQueue.main.async {
                 OpLock.release(lock)
                 self.busy = nil
@@ -200,7 +201,7 @@ extension AppDelegate {
                 _ = try? Helper.run(["down", t.name])
                 return try Helper.run(["up", t.name])
             }
-            return try runAsAdmin("wg-quick down \(shellQuote(t.path)); wg-quick up \(shellQuote(t.path))")
+            return try runAsAdmin(wgQuick("down", t.path) + "; " + wgQuick("up", t.path))
         }
     }
 

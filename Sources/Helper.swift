@@ -46,7 +46,9 @@ enum Helper {
       [[ $(( 0$(stat -f %Lp "$conf") & 022 )) == 0 ]] || { echo "$conf is group/world writable" >&2; exit 2; }
     }
     case "$cmd" in
-      version) echo 3 ;;
+      version) echo 4 ;;
+      dns-repair)
+        \#(SplitDNS.repairScript()) ;;
       up|down)
         check_conf
         exec "$H/bash" "$H/wg-quick" "$cmd" "$conf" ;;
@@ -69,7 +71,7 @@ enum Helper {
             echo "peer $n $k ${t:-0} ${ptr:-0 0}"
           done
         done ;;
-      *) echo "usage: wgtoggle-helper up|down|meta NAME | status | version" >&2; exit 2 ;;
+      *) echo "usage: wgtoggle-helper up|down|meta NAME | status | dns-repair | version" >&2; exit 2 ;;
     esac
     """#
 
@@ -87,21 +89,37 @@ enum Helper {
         let moves = moveFrom.map { src -> String in
             let name = ((src as NSString).lastPathComponent as NSString).deletingPathExtension
             let dest = shellQuote("\(configDir)/\(name).conf")
-            return "install -o root -g wheel -m 600 \(shellQuote(src)) \(dest) && cmp -s \(shellQuote(src)) \(dest)"
+            // record for rollback, copy, then verify byte for byte (set -e aborts and rolls back on mismatch)
+            return """
+                if [[ -e \(dest) ]]; then cp -p \(dest) \(dest).wgtoggle-bak; OVERWRITTEN+=(\(dest)); else NEW_CONFS+=(\(dest)); fi
+                install -o root -g wheel -m 600 \(shellQuote(src)) \(dest)
+                cmp -s \(shellQuote(src)) \(dest)
+                """
         }.joined(separator: "\n")
         return #"""
         #!/bin/bash
         set -euo pipefail
         H=\#(dir)
         NEW="$H.new.$$"
-        # Roll back to the previous install (helper, tools and sudo rule) if any later step fails.
+        S=\#(sudoers)
+        # Transaction: remember what existed, undo everything on ANY non-zero exit (set -e, failed command,
+        # explicit exit). Nothing is deleted until the final check passed.
+        COMMITTED=0; HAD_H=0; HAD_RULE=0; NEW_CONFS=(); OVERWRITTEN=()
+        if [[ -e "$H" ]]; then HAD_H=1; fi
+        if [[ -e "$S" ]]; then HAD_RULE=1; cp -p "$S" "$S.old"; fi
         rollback() {
           echo "install failed, rolling back" >&2
           rm -rf "$NEW"
-          if [[ -e "$H.old" ]]; then rm -rf "$H"; mv "$H.old" "$H"; fi
-          if [[ -e "\#(sudoers).old" ]]; then mv "\#(sudoers).old" \#(sudoers); fi
+          if [[ $HAD_H == 1 ]]; then
+            if [[ -e "$H.old" ]]; then rm -rf "$H"; mv "$H.old" "$H"; fi
+          else
+            rm -rf "$H"
+          fi
+          if [[ $HAD_RULE == 1 ]]; then mv "$S.old" "$S"; else rm -f "$S"; fi
+          for f in "${NEW_CONFS[@]+"${NEW_CONFS[@]}"}"; do rm -f "$f"; done
+          for f in "${OVERWRITTEN[@]+"${OVERWRITTEN[@]}"}"; do mv "$f.wgtoggle-bak" "$f"; done
         }
-        trap rollback ERR
+        trap 'rc=$?; if [[ $rc -ne 0 && $COMMITTED == 0 ]]; then rollback; fi' EXIT
         BREW=""
         for p in /opt/homebrew /usr/local; do [[ -x "$p/bin/wg-quick" ]] && BREW="$p" && break; done
         [[ -n "$BREW" ]] || { echo "wg-quick not found" >&2; exit 1; }
@@ -137,11 +155,14 @@ enum Helper {
         chown -R root:wheel "$NEW"; chmod -R go-w "$NEW"; chmod 755 "$NEW" "$NEW"/wg-quick "$NEW"/wg "$NEW"/wireguard-go "$NEW"/bash "$NEW"/wgtoggle-helper
         mkdir -p /Library/PrivilegedHelperTools
         rm -rf "$H.old"; if [[ -e "$H" ]]; then mv "$H" "$H.old"; fi; mv "$NEW" "$H"
-        if [[ -e \#(sudoers) ]]; then cp -p \#(sudoers) "\#(sudoers).old"; fi
         \#(withRule ? sudoersAndConfigs(user: user, moves: moves) : "rm -f \(sudoers)")
-        "$H/bash" -c 'exit 0'                                  # post-install check
-        trap - ERR
-        rm -rf "$H.old" "\#(sudoers).old"
+        # post-install checks: tools run, helper answers
+        # explicit exits: /bin/bash 3.2 does not apply set -e to a failing [[ ]]
+        "$H/bash" -c 'exit 0' || { echo "installed bash does not run" >&2; exit 1; }
+        [[ "$("$H/wgtoggle-helper" version)" == \#(currentVersion) ]] || { echo "installed helper does not answer" >&2; exit 1; }
+        COMMITTED=1
+        rm -rf "$H.old" "$S.old"
+        for f in "${OVERWRITTEN[@]+"${OVERWRITTEN[@]}"}"; do rm -f "$f.wgtoggle-bak"; done
         echo "helper installed"
         """#
     }
@@ -182,7 +203,7 @@ enum Helper {
     }
 
     /// Bump when the helper script changes; older installs get an "update" prompt.
-    static let currentVersion = 3
+    static let currentVersion = 4
 
     static var installedVersion: Int {
         guard isInstalled else { return 0 }
@@ -198,16 +219,21 @@ enum Helper {
     }
 
     private static let lock = NSLock()
-    private static var cache: (Date, [String: Status])?
+    private static var cache: (Date, [String: Status]?)?
+    private static var lastFailed = false
 
     /// `status()` is a sudo call; `isUp` is asked many times per second while the menu is open.
-    static func cachedStatus() -> [String: Status] {
+    /// nil = the helper couldn't be asked (not the same as "no tunnels up").
+    static func cachedStatus() -> [String: Status]? {
         lock.lock(); defer { lock.unlock() }
         if let (at, s) = cache, Date().timeIntervalSince(at) < 2 { return s }
         let s = status()
         cache = (Date(), s)
         return s
     }
+
+    /// Call after connecting/disconnecting so the next check reads fresh state.
+    static func invalidateCache() { lock.lock(); cache = nil; lock.unlock() }
 
     static func uninstall() throws {
         try runAsAdmin("rm -f \(sudoers) && rm -rf \(shellQuote(dir))")
@@ -236,9 +262,16 @@ enum Helper {
     struct Peer { let key: String; let handshake: Date?; let rx: UInt64; let tx: UInt64 }
     struct Status { let iface: String; let handshake: Date?; let rx: UInt64; let tx: UInt64; var peers: [Peer] = [] }
 
-    static func status() -> [String: Status] {
-        guard isInstalled, let out = try? run(["status"]) else { return [:] }
-        return parseStatus(out)
+    static func status() -> [String: Status]? {
+        guard isInstalled else { return nil }
+        do {
+            let out = try run(["status"])
+            if lastFailed { Log.info("helper status works again"); lastFailed = false }
+            return parseStatus(out)
+        } catch {
+            if !lastFailed { Log.error("helper status failed, tunnel state unknown", detail: error.localizedDescription); lastFailed = true }
+            return nil
+        }
     }
 
     /// `name iface hs rx tx` per tunnel, then `peer name key hs rx tx` per peer (helper v3+).

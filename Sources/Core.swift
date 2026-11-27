@@ -112,7 +112,10 @@ struct Tunnel {
             return interfaceTable().contains { $0.value.addrs.contains(addr) } ? .up : .down
         }
         // Root-only config: ask the helper which interface belongs to this tunnel and check that one.
-        if Helper.isInstalled { return Helper.cachedStatus()[name].map { interfaceTable()[$0.iface] != nil } == true ? .up : .down }
+        if Helper.isInstalled {
+            guard let status = Helper.cachedStatus() else { return .unknown }   // helper failed: don't guess
+            return status[name].map { interfaceTable()[$0.iface] != nil } == true ? .up : .down
+        }
         // No helper and an unreadable config: a name file alone may be stale, so don't claim it's up.
         return .unknown
     }
@@ -291,11 +294,24 @@ enum HookApproval {
 
 /// Runs a shell command as root via the standard macOS admin dialog.
 /// NSAppleScript runs in-process, so macOS caches the authorization for a few minutes.
+/// Where root runs WireGuard tools from: the root-owned copies if installed, else Homebrew's.
+func toolsDir() -> String? {
+    Helper.toolsInstalled ? Helper.dir : (findBinary("wg-quick") as NSString?)?.deletingLastPathComponent
+}
+
+/// Shell command running wg-quick by absolute path with its bash 4+ (never via PATH lookup).
+func wgQuick(_ verb: String, _ path: String) -> String {
+    let d = toolsDir() ?? "/opt/homebrew/bin"
+    return "\(shellQuote(d + "/bash")) \(shellQuote(d + "/wg-quick")) \(verb) \(shellQuote(path))"
+}
+
 @discardableResult
 func runAsAdmin(_ command: String) throws -> String {
     // Homebrew's tools are user-writable; prefer the root-owned copies from passwordless mode when present.
-    let tools = Helper.toolsInstalled ? [Helper.dir] : binDirs
-    let full = "export PATH=\(tools.joined(separator: ":")):/usr/bin:/bin:/usr/sbin:/sbin; \(command) 2>&1"
+    // System directories FIRST: as root, `cp`, `install`, `shasum`… must never resolve to a user-writable
+    // Homebrew file. The WireGuard tools come last (only `wg`/`wireguard-go` live there), and wg-quick itself
+    // is always started by absolute path (see wgQuick()).
+    let full = "export PATH=/usr/bin:/bin:/usr/sbin:/sbin:\(toolsDir() ?? "/nonexistent"); \(command) 2>&1"
     let escaped = full.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
     let script = NSAppleScript(source: "do shell script \"\(escaped)\" with administrator privileges")!
     var error: NSDictionary?

@@ -41,6 +41,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in self?.checkForUpdates(manual: false) }
         Timer.scheduledTimer(withTimeInterval: 24 * 3600, repeats: true) { [weak self] _ in self?.checkForUpdates(manual: false) }
         Log.info("passwordless mode: \(Helper.isInstalled ? "on" : "off")")
+        // After a crash or reboot, resolvers of tunnels that aren't running anymore can be left behind.
+        if Helper.isInstalled && Helper.installedVersion >= 4 {
+            DispatchQueue.global().async {
+                if let out = try? Helper.run(["dns-repair"]), !out.contains("nothing to repair"), !out.isEmpty {
+                    Log.info("dns repair at launch", detail: out.trimmingCharacters(in: .whitespacesAndNewlines))
+                }
+            }
+        }
         if CommandLine.arguments.contains("--show-logs") { MainActor.assumeIsolated { LogExplorer.show() } }
         if CommandLine.arguments.contains("--show-about") { showAbout() }
         // README screenshots: open the menu bar menu programmatically.

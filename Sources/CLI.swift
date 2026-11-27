@@ -15,6 +15,7 @@ enum CLI {
           routes [--json]       networks each tunnel sends through the VPN
           conflicts             overlapping routes, default routes, shared DNS domains
           dns                   active split-DNS resolvers (/etc/resolver)
+          dns repair            clean up resolvers left by crashed tunnels or a reboot
           version               app and wireguard-tools versions
           diagnose              status plus app settings (no keys are printed)
 
@@ -55,7 +56,13 @@ enum CLI {
                 let down = before.subtracting(members).sorted(), up = Set(members).subtracting(before).sorted()
                 _ = apply(down, up: false)
                 _ = apply(up, up: true)
-                let after = Set(listTunnels().filter(\.isUp).map(\.name))
+                let now = listTunnels()
+                let unknown = now.filter { $0.state == .unknown }.map(\.name)
+                guard unknown.isEmpty else {
+                    fputs("wgtoggle profile: can't verify \(unknown.joined(separator: ", ")) (state unknown)\n", stderr)
+                    return 4
+                }
+                let after = Set(now.filter(\.isUp).map(\.name))
                 if after == Set(members) { print("profile \(name) active"); return 0 }
                 fputs("wgtoggle profile: switch to \(name) failed (up: \(after.sorted().joined(separator: ", "))), restoring previous tunnels\n", stderr)
                 _ = apply(after.subtracting(before).sorted(), up: false)
@@ -88,6 +95,20 @@ enum CLI {
             }
             if found.isEmpty && skipped.isEmpty { print("no conflicts between \(all.count) tunnels") }
             return !found.isEmpty ? 1 : skipped.isEmpty ? 0 : 4
+        case "dns" where rest.first == "repair":
+            return withLock {
+                Log.info("cli: dns repair")
+                if Helper.isInstalled && Helper.installedVersion >= 4 {
+                    do { print(try Helper.run(["dns-repair"]), terminator: ""); return 0 }
+                    catch { fputs("\(error.localizedDescription)\n", stderr); return 1 }
+                }
+                let p = Process()
+                p.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
+                p.arguments = ["/bin/bash", "-c", SplitDNS.repairScript()]
+                do { try p.run() } catch { return 1 }
+                p.waitUntilExit()
+                return p.terminationStatus == 0 ? 0 : 1
+            }
         case "dns":
             let dir = "/etc/resolver"
             let files = ((try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []).sorted()
@@ -132,7 +153,7 @@ enum CLI {
                     d["rxBytes"] = s.rx
                     d["txBytes"] = s.tx
                     d["lastHandshake"] = s.handshake.map { ISO8601DateFormatter().string(from: $0) } ?? NSNull()
-                    d["peers"] = (Helper.cachedStatus()[t.name]?.peers ?? []).map { p in
+                    d["peers"] = (Helper.cachedStatus()?[t.name]?.peers ?? []).map { p in
                         ["publicKey": p.key, "rxBytes": p.rx, "txBytes": p.tx,
                          "lastHandshake": p.handshake.map { ISO8601DateFormatter().string(from: $0) } as Any? ?? NSNull()] as [String: Any]
                     }
@@ -204,6 +225,7 @@ enum CLI {
             } else {
                 ok = sudoWgQuick(verb, t.path)
             }
+            Helper.invalidateCache()
             if !ok { rc = 1; Log.error("cli: wg-quick \(verb) \(name) failed") }
         }
         return rc
@@ -219,7 +241,7 @@ enum CLI {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
         // wg-quick needs bash 4+ and finds wg/wireguard-go via PATH, which sudo resets.
-        p.arguments = ["/usr/bin/env", "PATH=\(tools):/usr/bin:/bin:/usr/sbin:/sbin", bash, "\(tools)/wg-quick", verb, path]
+        p.arguments = ["/usr/bin/env", "PATH=/usr/bin:/bin:/usr/sbin:/sbin:\(tools)", bash, "\(tools)/wg-quick", verb, path]
         do { try p.run() } catch { fputs("\(error.localizedDescription)\n", stderr); return false }
         p.waitUntilExit()
         return p.terminationStatus == 0

@@ -37,7 +37,9 @@ jobs:
           echo "BUILD_NUMBER=$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
 
       - name: Tests
-        run: Tests/run.sh
+        run: |
+          brew install wireguard-tools   # lets the installer transaction test run
+          Tests/run.sh
 
       - name: Build
         run: |
