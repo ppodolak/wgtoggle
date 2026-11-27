@@ -125,7 +125,7 @@ extension AppDelegate {
     func startBlink() {
         statusItem.button?.toolTip = busy
         var phase = 0
-        let frames = ["shield", "shield.lefthalf.filled", "shield.fill", "shield.lefthalf.filled"]
+        let frames = ["shield", "shield.lefthalf.filled", "checkmark.shield", "shield.lefthalf.filled"]
         blinkTimer?.invalidate()
         blinkTimer = Timer.scheduledTimer(withTimeInterval: 0.35, repeats: true) { [weak self] _ in
             guard let self, let button = self.statusItem.button else { return }

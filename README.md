@@ -48,7 +48,7 @@ brew install --cask ppodolak/tap/wgtoggle
 
 ## Features
 
-- Menu bar status: monochrome icon that matches light and dark menu bars: outline = all down, half = some up, filled = all up. Hover to see which tunnels are up.
+- Menu bar status: monochrome icon that matches light and dark menu bars: outline = all down, half = some up, outline with a check = all up, outline with ! = a tunnel looks stuck. Hover to see which tunnels are up.
 - Toggle one or all: click a tunnel to turn it on or off, or use **Connect All** / **Disconnect All**.
 - Add tunnels: import several `.conf` files at once, paste a config from your VPN portal, or drag files onto the app icon.
 - Conflict checks: warns before saving a config whose `AllowedIPs` overlap another tunnel, that routes `0.0.0.0/0`, or that sets a global `DNS =`.

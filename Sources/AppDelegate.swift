@@ -111,8 +111,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         lastState = state
 
         let anyStuck = stats.values.contains { $0.stuck }
-        let symbol = anyStuck ? "exclamationmark.shield.fill"
-            : up.isEmpty ? "shield" : (up.count == tunnels.count ? "shield.fill" : "shield.lefthalf.filled")
+        // Outlined symbols throughout: outline = all down, half = some up, outline + check = all up.
+        let symbol = anyStuck ? "exclamationmark.shield"
+            : up.isEmpty ? "shield" : (up.count == tunnels.count ? "checkmark.shield" : "shield.lefthalf.filled")
         let cfg = NSImage.SymbolConfiguration(pointSize: 14, weight: .medium)
         let img = NSImage(systemSymbolName: symbol, accessibilityDescription: "WireGuard")?.withSymbolConfiguration(cfg)
         img?.isTemplate = true   // monochrome, adapts to light/dark menu bar

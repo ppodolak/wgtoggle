@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.13.1 - 2026-11-27
+
+### Changed
+- Menu bar icon uses outlined shields in every state: outline (all down), half (some up), outline with a check (all up), outline with ! (a tunnel looks stuck).
+
 ## 1.13.0 - 2026-11-27
 
 ### Added
