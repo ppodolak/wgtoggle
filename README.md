@@ -241,7 +241,7 @@ Homebrew's `wg-quick`, `wg`, `wireguard-go` and `bash` are writable by your user
 - The helper only accepts `up NAME`, `down NAME` and `status`, checks the name, and only runs configs in `/etc/wireguard/` that are owned by root and not writable by anyone else.
 - Your configs are moved into `/etc/wireguard/`. Adding, editing or removing a tunnel still asks for your password.
 
-When a WGToggle update ships a newer helper, **Settings** shows **Update Passwordless Helper…** (one password prompt). Use it too after `brew upgrade wireguard-tools` to pick up the new tool versions.
+When a WGToggle update ships a newer helper, you get a notification at launch (click it to update) and **Settings** shows **Update Passwordless Helper…** (one password prompt). Use it too after `brew upgrade wireguard-tools` to pick up the new tool versions.
 
 The helper also lets the app check root-owned configs for conflicts: `meta NAME` returns only the `Address`, `AllowedIPs`, `DNS` and hook lines, never keys. Turning it off removes the helper and the sudoers rule; configs stay in `/etc/wireguard/`.
 

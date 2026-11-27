@@ -36,7 +36,14 @@ final class Notify: NSObject, UNUserNotificationCenterDelegate {
              id: "error-\(UUID().uuidString)", openLogs: true, sound: .defaultCritical)
     }
 
-    static func post(title: String, body: String, id: String = UUID().uuidString, openLogs: Bool = false,
+    /// Clicking it runs Settings → Update Passwordless Helper (one password prompt).
+    static func helperUpdateNeeded(installed: Int) {
+        post(title: "Passwordless helper needs an update",
+             body: "Installed v\(installed), this version needs v\(Helper.currentVersion). Click to update (asks for your password once).",
+             id: "helper-update", action: "updateHelper")
+    }
+
+    static func post(title: String, body: String, id: String = UUID().uuidString, openLogs: Bool = false, action: String? = nil,
                              sound: UNNotificationSound = .default) {
         guard enabled else { return }
         let content = UNMutableNotificationContent()
@@ -45,6 +52,7 @@ final class Notify: NSObject, UNUserNotificationCenterDelegate {
         content.sound = sound
         content.threadIdentifier = openLogs ? "errors" : "state"
         if openLogs { content.userInfo = ["open": "logs"] }
+        if let action { content.userInfo = ["open": action] }
         // Same id per tunnel → a fresh up/down replaces the previous banner instead of stacking.
         UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: id, content: content, trigger: nil)) { err in
             if let err { Log.warn("notification failed: \(err.localizedDescription)") }
@@ -59,6 +67,9 @@ final class Notify: NSObject, UNUserNotificationCenterDelegate {
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
                                 withCompletionHandler done: @escaping () -> Void) {
+        if response.notification.request.content.userInfo["open"] as? String == "updateHelper" {
+            DispatchQueue.main.async { NSApp.sendAction(Selector(("updateHelper")), to: NSApp.delegate, from: nil) }
+        }
         if response.notification.request.content.userInfo["open"] as? String == "logs" {
             DispatchQueue.main.async { MainActor.assumeIsolated { LogExplorer.show() } }
         }

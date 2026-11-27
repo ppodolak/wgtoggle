@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.11.1 - 2026-11-27
+
+### Added
+- Notification at launch when the passwordless helper is older than the app needs. Click it to update (one password prompt).
+
 ## 1.11.0 - 2026-11-27
 
 ### Added

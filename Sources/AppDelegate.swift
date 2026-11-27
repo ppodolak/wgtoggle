@@ -41,6 +41,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in self?.checkForUpdates(manual: false) }
         Timer.scheduledTimer(withTimeInterval: 24 * 3600, repeats: true) { [weak self] _ in self?.checkForUpdates(manual: false) }
         Log.info("passwordless mode: \(Helper.isInstalled ? "on" : "off")")
+        // Older helper after an app update: features silently missing otherwise, so say it once per launch.
+        if Helper.needsUpdate {
+            Log.warn("passwordless helper v\(Helper.installedVersion) is older than v\(Helper.currentVersion)")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { Notify.helperUpdateNeeded(installed: Helper.installedVersion) }
+        }
         // After a crash or reboot, resolvers of tunnels that aren't running anymore can be left behind.
         if Helper.isInstalled && Helper.installedVersion >= 4 {
             DispatchQueue.global().async {
