@@ -35,6 +35,8 @@ check(resolverDomains("PostUp = printf 'x' > /etc/resolver/Corp\nPostDown = rm -
 let tmp = NSTemporaryDirectory() + "wgtest-\(UUID().uuidString).conf"
 try! conf.write(toFile: tmp, atomically: true, encoding: .utf8)
 check(tunnelAddress(tmp) == "10.10.3.10", "tunnel address")
+try! "[Interface]\nAddress = fd00:0:0::0010/128\n".write(toFile: tmp, atomically: true, encoding: .utf8)
+check(tunnelAddress(tmp) == "fd00::10", "IPv6-only tunnel address, canonical form")
 try? FileManager.default.removeItem(atPath: tmp)
 
 print("split DNS")
@@ -42,8 +44,8 @@ let plan = SplitDNS.plan(conf)!
 check(plan.servers == ["10.0.0.53", "10.0.0.54"] && plan.domains == ["corp", "lab.example"], "plan servers/domains")
 let converted = SplitDNS.convert(conf, plan: plan)
 check(confValues(converted, key: "dns").isEmpty, "DNS line removed")
-check(hookLines(converted).count == 4, "2 PostUp + 2 PostDown")
-check(converted.contains("printf 'nameserver 10.0.0.53\\nnameserver 10.0.0.54\\n' > /etc/resolver/corp"), "resolver hook content")
+check(hookLines(converted).count == 8, "4 hook lines per domain")
+check(converted.contains("printf 'nameserver 10.0.0.53\\nnameserver 10.0.0.54\\n' > /var/run/wgtoggle-dns/corp.if.%i && cp /var/run/wgtoggle-dns/corp.if.%i /etc/resolver/corp"), "resolver hook content")
 check(converted.contains("[Peer]") && converted.contains("MTU = 1380"), "rest of config kept")
 let ipOnly = "[Interface]\nPrivateKey = A\nDNS = 1.1.1.1\n[Peer]\nPublicKey = B\n"
 let p2 = SplitDNS.plan(ipOnly)!
@@ -77,12 +79,13 @@ do {
     let base = NSTemporaryDirectory() + "wgdns-\(UUID().uuidString.prefix(8))"
     let R = base + "/resolver", M = base + "/markers", W = base + "/run"
     try! FileManager.default.createDirectory(atPath: W, withIntermediateDirectories: true)
-    let hooks = SplitDNS.hooks(domain: "corp", nameservers: "nameserver 10.0.0.53\\n", resolverDir: R, markerDir: M, runDir: W)
-    func hook(_ prefix: String, _ iface: String) {
-        let cmd = hooks.first { $0.hasPrefix(prefix) }!.split(separator: "=", maxSplits: 1)[1]
-            .trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "%i", with: iface)
-        let p = Process(); p.executableURL = URL(fileURLWithPath: "/bin/bash"); p.arguments = ["-c", "(eval \"$1\")", "_", cmd]
-        try! p.run(); p.waitUntilExit()
+    func hooks(_ ns: String) -> [String] { SplitDNS.hooks(domain: "corp", nameservers: "nameserver \(ns)\\n", resolverDir: R, markerDir: M, runDir: W) }
+    func run(_ hs: [String], _ prefix: String, _ iface: String) {
+        for h in hs where h.hasPrefix(prefix) {   // wg-quick runs each hook line in its own subshell
+            let cmd = h.split(separator: "=", maxSplits: 1)[1].trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "%i", with: iface)
+            let p = Process(); p.executableURL = URL(fileURLWithPath: "/bin/bash"); p.arguments = ["-c", "(eval \"$1\")", "_", cmd]
+            try! p.run(); p.waitUntilExit()
+        }
     }
     var socks: [String: Int32] = [:]
     func sock(_ iface: String, alive: Bool) {   // stands in for wireguard-go's control socket
@@ -100,17 +103,27 @@ do {
     }
     let resolver = R + "/corp"
     let fm = FileManager.default
-    hook("PostUp", "utun10"); sock("utun10", alive: true)
-    hook("PostUp", "utun11"); sock("utun11", alive: true)
-    check(fm.fileExists(atPath: resolver), "resolver created")
-    sock("utun11", alive: false); hook("PostDown", "utun11")
-    check(fm.fileExists(atPath: resolver), "second tunnel down: resolver kept for the first")
-    sock("utun10", alive: false); hook("PostDown", "utun10")
+    func content() -> String { (try? String(contentsOfFile: resolver, encoding: .utf8)) ?? "" }
+    let dev = hooks("10.10.0.53"), prod = hooks("10.20.0.53")
+    func up(_ h: [String], _ i: String) { run(h, "PostUp", i); sock(i, alive: true); Thread.sleep(forTimeInterval: 1.1) }  // ls -t has 1s resolution
+    func down(_ h: [String], _ i: String) { sock(i, alive: false); run(h, "PostDown", i) }   // wg-quick removes the socket first
+
+    up(dev, "utun10"); up(prod, "utun11")
+    check(content().contains("10.20.0.53"), "newest tunnel's nameserver is used")
+    down(prod, "utun11")
+    check(content().contains("10.10.0.53") && !content().contains("10.20.0.53"), "after prod disconnects, dev's nameserver is back")
+    down(dev, "utun10")
     check(!fm.fileExists(atPath: resolver), "last tunnel down: resolver removed")
-    hook("PostUp", "utun10"); sock("utun10", alive: true)
-    hook("PostUp", "utun11"); sock("utun11", alive: false)   // utun11 crashed, its marker is stale
-    sock("utun10", alive: false); hook("PostDown", "utun10")
-    check(!fm.fileExists(atPath: resolver), "stale marker of a dead tunnel doesn't keep the resolver")
+
+    up(dev, "utun10"); run(prod, "PostUp", "utun11")   // utun11 starts, then crashes (no socket)
+    down(dev, "utun10")
+    check(!fm.fileExists(atPath: resolver), "stale marker of a crashed tunnel doesn't keep the resolver")
+
+    try! "nameserver 192.0.2.1\n".write(toFile: resolver, atomically: true, encoding: .utf8)   // made by someone else
+    up(dev, "utun10"); up(prod, "utun11")
+    down(dev, "utun10"); down(prod, "utun11")
+    check(content() == "nameserver 192.0.2.1\n", "pre-existing resolver file restored afterwards")
+    let hooks = dev
     let x = "[Interface]\n" + hooks.joined(separator: "\n").replacingOccurrences(of: M, with: SplitDNS.markerDir)
     check(conflicts(name: "a", conf: x, others: [(name: "b", conf: x)]).isEmpty, "no shared-DNS warning when both coordinate")
     try? fm.removeItem(atPath: base)
@@ -128,6 +141,8 @@ OpLock.release(l2!)
 print("updates")
 check(Updates.isNewer("1.3.0", than: "1.2") && Updates.isNewer("1.10", than: "1.9.9"), "newer")
 check(!Updates.isNewer("1.2.0", than: "1.2") && !Updates.isNewer("1.2", than: "1.2.1"), "not newer")
+check(Updates.isNewer("1.7.0", than: "1.7.0-beta.2") && !Updates.isNewer("1.7.0-beta.2", than: "1.7.0"), "release beats its prerelease")
+check(Updates.isNewer("1.7.0-beta.10", than: "1.7.0-beta.9") && Updates.isNewer("1.7.0-beta.1", than: "1.6.9"), "prerelease ordering")
 
 print("QR")
 let qrText = conf
@@ -161,6 +176,8 @@ func runHelper(_ args: [String]) -> Int32 {
 }
 check(bashN(Helper.script), "helper script syntax")
 check(bashN(Helper.installer(user: "tester", moveFrom: ["/tmp/a b.conf"])), "installer script syntax")
+let toolsOnly = Helper.installer(user: "tester", moveFrom: [], sudoers: false)
+check(bashN(toolsOnly) && !toolsOnly.contains("visudo") && toolsOnly.contains("rm -f /etc/sudoers.d/wgtoggle"), "tools-only installer: no sudo rule")
 check(Helper.installer(user: "tester", moveFrom: ["/tmp/a b.conf"]).contains("'/tmp/a b.conf'"), "installer quotes paths")
 check(runHelper(["up", "../../tmp/x"]) == 2, "helper rejects path traversal")
 check(runHelper(["up", "corporate-vpn-prd"]) == 2, "helper rejects long names")

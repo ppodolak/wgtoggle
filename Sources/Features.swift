@@ -25,16 +25,21 @@ enum SplitDNS {
 
     /// Removes DNS lines; when domains are known, adds resolver hooks right after [Interface].
     static let resolverDir = "/etc/resolver"
-    /// One marker per (domain, interface) while a tunnel is up; /var/run is cleared at boot.
+    /// Per (domain, interface) marker holding that tunnel's nameservers; /var/run is cleared at boot.
     static let markerDir = "/var/run/wgtoggle-dns"
 
-    /// Hook lines for one domain. Several tunnels can share a domain: each leaves a marker, and the
-    /// resolver file is only removed when no marker of a still-running tunnel (live wireguard-go socket) is left.
-    static func hooks(domain d: String, nameservers ns: String, resolverDir: String = resolverDir,
-                      markerDir: String = markerDir, runDir: String = "/var/run/wireguard") -> [String] {
+    /// Hook lines for one domain. Several tunnels can share a domain, even with different nameservers:
+    /// each running tunnel keeps its own resolver content in a marker. On disconnect the resolver is rebuilt
+    /// from the newest marker of a tunnel that's still running (live wireguard-go socket), and when none is
+    /// left, a resolver file that existed before WGToggle took over is put back (otherwise it's removed).
+    static func hooks(domain d: String, nameservers ns: String, resolverDir R: String = resolverDir,
+                      markerDir M: String = markerDir, runDir W: String = "/var/run/wireguard") -> [String] {
         [
-            "PostUp = mkdir -p \(resolverDir) \(markerDir) && printf '\(ns)' > \(resolverDir)/\(d) && touch \(markerDir)/\(d).%i",
-            "PostDown = rm -f \(markerDir)/\(d).%i; for m in \(markerDir)/\(d).*; do [ -S \"\(runDir)/${m##*.}.sock\" ] && exit 0; done; rm -f \(resolverDir)/\(d)",
+            // keep a resolver file someone else created, the first time we take over this domain
+            "PostUp = mkdir -p \(R) \(M) && if [ -e \(R)/\(d) ] && ! ls \(M)/\(d).if.* >/dev/null 2>&1; then cp -p \(R)/\(d) \(M)/\(d).orig; fi",
+            "PostUp = printf '\(ns)' > \(M)/\(d).if.%i && cp \(M)/\(d).if.%i \(R)/\(d)",
+            "PostDown = rm -f \(M)/\(d).if.%i",
+            "PostDown = for m in $(ls -t \(M)/\(d).if.* 2>/dev/null); do if [ -S \"\(W)/${m##*.}.sock\" ]; then cp \"$m\" \(R)/\(d); exit 0; fi; rm -f \"$m\"; done; if [ -e \(M)/\(d).orig ]; then mv \(M)/\(d).orig \(R)/\(d); else rm -f \(R)/\(d); fi",
         ]
     }
 
@@ -92,13 +97,22 @@ enum Updates {
 
     struct Release { let version: String; let url: URL }
 
+    /// Semver-ish: 1.10 > 1.9, and a release beats its prerelease (1.7.0 > 1.7.0-beta.2).
     static func isNewer(_ a: String, than b: String) -> Bool {
-        let pa = a.split(separator: ".").map { Int($0) ?? 0 }, pb = b.split(separator: ".").map { Int($0) ?? 0 }
+        func split(_ v: String) -> ([Int], String?) {
+            let parts = v.split(separator: "-", maxSplits: 1)
+            return (parts[0].split(separator: ".").map { Int($0) ?? 0 }, parts.count > 1 ? String(parts[1]) : nil)
+        }
+        let (pa, ra) = split(a), (pb, rb) = split(b)
         for i in 0..<max(pa.count, pb.count) {
             let x = i < pa.count ? pa[i] : 0, y = i < pb.count ? pb[i] : 0
             if x != y { return x > y }
         }
-        return false
+        switch (ra, rb) {
+        case (nil, nil), (.some, nil): return false
+        case (nil, .some): return true
+        case let (.some(x), .some(y)): return x.compare(y, options: .numeric) == .orderedDescending
+        }
     }
 
     /// Only sends a plain GET to api.github.com; no identifiers.

@@ -70,7 +70,15 @@ enum Helper {
 
     /// Root installer: copies tools + their Homebrew dylibs into the helper dir, rewires library paths,
     /// writes the helper and a visudo-checked sudoers rule, and moves configs into /etc/wireguard.
-    static func installer(user: String, moveFrom: [String]) -> String {
+    /// Root-owned tool copies exist (installed by passwordless mode or on their own).
+    static var toolsInstalled: Bool {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: "\(dir)/wg-quick"), let a = try? fm.attributesOfItem(atPath: dir) else { return false }
+        return (a[.ownerAccountID] as? Int) == 0
+    }
+
+    /// `sudoers: false` installs only the root-owned tool copies (password prompts stay).
+    static func installer(user: String, moveFrom: [String], sudoers withRule: Bool = true) -> String {
         let moves = moveFrom.map { src -> String in
             let name = ((src as NSString).lastPathComponent as NSString).deletingPathExtension
             return "install -o root -g wheel -m 600 \(shellQuote(src)) \(shellQuote("\(configDir)/\(name).conf"))"
@@ -115,7 +123,13 @@ enum Helper {
         chown -R root:wheel "$NEW"; chmod -R go-w "$NEW"; chmod 755 "$NEW" "$NEW"/wg-quick "$NEW"/wg "$NEW"/wireguard-go "$NEW"/bash "$NEW"/wgtoggle-helper
         mkdir -p /Library/PrivilegedHelperTools
         rm -rf "$H.old"; [[ -e "$H" ]] && mv "$H" "$H.old"; mv "$NEW" "$H"; rm -rf "$H.old"
+        \#(withRule ? sudoersAndConfigs(user: user, moves: moves) : "rm -f \(sudoers)")
+        echo "helper installed"
+        """#
+    }
 
+    static func sudoersAndConfigs(user: String, moves: String) -> String {
+        #"""
         RULE=$(mktemp)
         echo "\#(user) ALL=(root) NOPASSWD: $H/wgtoggle-helper" > "$RULE"
         visudo -cf "$RULE" >/dev/null
@@ -123,18 +137,17 @@ enum Helper {
 
         mkdir -p \#(configDir); chown root:wheel \#(configDir); chmod 755 \#(configDir)
         \#(moves)
-        echo "helper installed"
         """#
     }
 
     /// One admin prompt. The script is staged in a root-only path and hash-checked before it runs,
     /// so a user process can't swap it between writing and execution.
-    static func install(movingConfigs: [Tunnel]) throws -> String {
+    static func install(movingConfigs: [Tunnel], sudoers withRule: Bool = true) throws -> String {
         let user = NSUserName()
         guard user.range(of: "^[a-zA-Z0-9._-]+$", options: .regularExpression) != nil else {
             throw NSError(domain: "WGToggle", code: 1, userInfo: [NSLocalizedDescriptionKey: "Unsupported user name"])
         }
-        let text = installer(user: user, moveFrom: movingConfigs.map(\.path))
+        let text = installer(user: user, moveFrom: withRule ? movingConfigs.map(\.path) : [], sudoers: withRule)
         let hash = sha256(Data(text.utf8))
         let tmp = NSTemporaryDirectory() + "wgtoggle-install-\(UUID().uuidString).sh"
         try text.write(toFile: tmp, atomically: true, encoding: .utf8)

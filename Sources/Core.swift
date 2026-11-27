@@ -92,17 +92,20 @@ struct Tunnel {
     let path: String
     /// wg-quick leaves <name>.name behind if wireguard-go dies, so the name file alone isn't proof.
     /// Up = name file exists AND the tunnel's interface is really there.
-    var isUp: Bool {
-        if demoMode { return Demo.up.contains(name) }
-        let fm = FileManager.default
-        guard fm.fileExists(atPath: "\(runDir)/\(name).name") else { return false }
+    var isUp: Bool { state == .up }
+
+    enum State { case up, down, unknown }
+
+    var state: State {
+        if demoMode { return Demo.up.contains(name) ? .up : .down }
+        guard FileManager.default.fileExists(atPath: "\(runDir)/\(name).name") else { return .down }
         if let addr = tunnelAddress(path) {
-            return interfaceTable().contains { $0.value.addr == addr }
+            return interfaceTable().contains { $0.value.addrs.contains(addr) } ? .up : .down
         }
         // Root-only config: ask the helper which interface belongs to this tunnel and check that one.
-        if let iface = Helper.cachedStatus()[name]?.iface { return interfaceTable()[iface] != nil }
-        // ponytail: no helper and an unreadable config: the name file is all we can see (may be stale).
-        return !Helper.isInstalled
+        if Helper.isInstalled { return Helper.cachedStatus()[name].map { interfaceTable()[$0.iface] != nil } == true ? .up : .down }
+        // No helper and an unreadable config: a name file alone may be stale, so don't claim it's up.
+        return .unknown
     }
 }
 
@@ -157,9 +160,15 @@ func configText(_ t: Tunnel) -> String? {
 /// First IPv4 Address of a readable config, e.g. "10.8.0.2".
 func tunnelAddress(_ path: String) -> String? {
     guard let conf = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
-    return confValues(conf, key: "address").flatMap { $0.split(separator: ",") }
-        .map { $0.trimmingCharacters(in: .whitespaces) }.first { $0.contains(".") }?
-        .split(separator: "/").first.map(String.init)
+    let addrs = confValues(conf, key: "address").flatMap { $0.split(separator: ",") }
+        .compactMap { $0.trimmingCharacters(in: .whitespaces).split(separator: "/").first.map(String.init) }
+    // Prefer IPv4; IPv6-only tunnels use their IPv6 address, written the way the system prints it.
+    if let v4 = addrs.first(where: { $0.contains(".") }) { return v4 }
+    var a = in6_addr()
+    guard let v6 = addrs.first, inet_pton(AF_INET6, v6, &a) == 1 else { return nil }
+    var buf = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+    inet_ntop(AF_INET6, &a, &buf, socklen_t(INET6_ADDRSTRLEN))
+    return String(cString: buf)
 }
 
 /// wg-quick derives the interface name from the file name: max 15 chars, limited charset.
@@ -276,7 +285,7 @@ enum HookApproval {
 @discardableResult
 func runAsAdmin(_ command: String) throws -> String {
     // Homebrew's tools are user-writable; prefer the root-owned copies from passwordless mode when present.
-    let tools = Helper.isInstalled ? [Helper.dir] : binDirs
+    let tools = Helper.toolsInstalled ? [Helper.dir] : binDirs
     let full = "export PATH=\(tools.joined(separator: ":")):/usr/bin:/bin:/usr/sbin:/sbin; \(command) 2>&1"
     let escaped = full.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
     let script = NSAppleScript(source: "do shell script \"\(escaped)\" with administrator privileges")!

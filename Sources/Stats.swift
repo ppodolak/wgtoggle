@@ -16,9 +16,9 @@ struct TunnelStats {
     var stuck = false
 }
 
-/// iface → (IPv4 address, rx bytes, tx bytes)
-func interfaceTable() -> [String: (addr: String?, rx: UInt64, tx: UInt64)] {
-    var result: [String: (addr: String?, rx: UInt64, tx: UInt64)] = [:]
+/// iface → (first IPv4 address, all IPv4/IPv6 addresses, rx bytes, tx bytes)
+func interfaceTable() -> [String: (addr: String?, addrs: Set<String>, rx: UInt64, tx: UInt64)] {
+    var result: [String: (addr: String?, addrs: Set<String>, rx: UInt64, tx: UInt64)] = [:]
     var head: UnsafeMutablePointer<ifaddrs>?
     guard getifaddrs(&head) == 0, let first = head else { return result }
     defer { freeifaddrs(head) }
@@ -27,7 +27,7 @@ func interfaceTable() -> [String: (addr: String?, rx: UInt64, tx: UInt64)] {
         defer { p = ifa.pointee.ifa_next }
         let name = String(cString: ifa.pointee.ifa_name)
         guard name.hasPrefix("utun"), let sa = ifa.pointee.ifa_addr else { continue }
-        var entry = result[name] ?? (nil, 0, 0)
+        var entry = result[name] ?? (nil, [], 0, 0)
         switch Int32(sa.pointee.sa_family) {
         case AF_INET:
             var buf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
@@ -35,14 +35,22 @@ func interfaceTable() -> [String: (addr: String?, rx: UInt64, tx: UInt64)] {
                 var a = sin.pointee.sin_addr
                 inet_ntop(AF_INET, &a, &buf, socklen_t(INET_ADDRSTRLEN))
             }
-            entry.addr = String(cString: buf)
+            entry.addr = entry.addr ?? String(cString: buf)
+            entry.addrs.insert(String(cString: buf))
+        case AF_INET6:
+            var buf = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+            sa.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { sin in
+                var a = sin.pointee.sin6_addr
+                inet_ntop(AF_INET6, &a, &buf, socklen_t(INET6_ADDRSTRLEN))
+            }
+            entry.addrs.insert(String(cString: buf))   // IPv6-only tunnels are found by this
         default: break
         }
         result[name] = entry
     }
     // getifaddrs() rounds byte counters to whole KB; read exact 64-bit counters like netstat does.
     for (name, c) in exactCounters() where name.hasPrefix("utun") {
-        var e = result[name] ?? (nil, 0, 0)
+        var e = result[name] ?? (nil, [], 0, 0)
         e.rx = c.rx; e.tx = c.tx
         result[name] = e
     }
@@ -97,9 +105,9 @@ final class HealthMonitor {
             if let h = helper[t.name] {
                 s.iface = h.iface
                 s.handshake = h.handshake
-                s.address = table[h.iface]?.addr
+                s.address = table[h.iface]?.addr ?? table[h.iface]?.addrs.sorted().first
             } else if let addr = tunnelAddress(t.path),
-                      let iface = table.first(where: { $0.value.addr == addr })?.key {
+                      let iface = table.first(where: { $0.value.addrs.contains(addr) })?.key {
                 s.iface = iface
                 s.address = addr
             }

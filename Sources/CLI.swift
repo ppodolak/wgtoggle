@@ -18,7 +18,8 @@ enum CLI {
           version               app and wireguard-tools versions
           diagnose              status plus app settings (no keys are printed)
 
-        Exit codes: 0 ok, 1 failed or problems found, 2 usage error.
+        Exit codes: 0 ok, 1 failed or problems found, 2 usage error,
+                    4 incomplete (some configs couldn't be checked).
         JSON output has a "version" field; it changes only when fields are removed or renamed.
 
         Connecting asks for your password unless passwordless mode is on.
@@ -33,7 +34,7 @@ enum CLI {
             // --names / --profiles: plain lists for shell completion (no status lookups, fast)
             if rest.contains("--names") { listTunnels().forEach { print($0.name) }; return 0 }
             if rest.contains("--profiles") { Profiles.all.keys.sorted().forEach { print($0) }; return 0 }
-            for t in listTunnels() { print("\(t.isUp ? "up  " : "down")  \(t.name)") }
+            for t in listTunnels() { print("\(label(t.state))  \(t.name)") }
             return 0
         case "status":
             return status(json: rest.contains("--json"))
@@ -45,13 +46,21 @@ enum CLI {
                 fputs("wgtoggle profile: unknown profile. Saved: \(Profiles.all.keys.sorted().joined(separator: ", "))\n", stderr)
                 return 2
             }
-            let tunnels = listTunnels()
-            let down = tunnels.filter { $0.isUp && !members.contains($0.name) }.map(\.name)
-            let up = tunnels.filter { !$0.isUp && members.contains($0.name) }.map(\.name)
-            var rc: Int32 = 0
-            if !down.isEmpty { rc = setState(down, up: false) }
-            if !up.isEmpty, rc == 0 { rc = setState(up, up: true) }
-            return rc
+            let missing = members.filter { m in !listTunnels().contains { $0.name == m } }
+            guard missing.isEmpty else { fputs("wgtoggle profile: \(name) uses unknown tunnels: \(missing.joined(separator: ", "))\n", stderr); return 2 }
+            return withLock {
+                // One transition under one lock: down the extras, up the members, verify, else roll back.
+                let before = Set(listTunnels().filter(\.isUp).map(\.name))
+                let down = before.subtracting(members).sorted(), up = Set(members).subtracting(before).sorted()
+                _ = apply(down, up: false)
+                _ = apply(up, up: true)
+                let after = Set(listTunnels().filter(\.isUp).map(\.name))
+                if after == Set(members) { print("profile \(name) active"); return 0 }
+                fputs("wgtoggle profile: switch to \(name) failed (up: \(after.sorted().joined(separator: ", "))), restoring previous tunnels\n", stderr)
+                _ = apply(after.subtracting(before).sorted(), up: false)
+                _ = apply(before.subtracting(after).sorted(), up: true)
+                return 1
+            }
         case "routes":
             let rows = listTunnels().map { t in (t, configText(t).map(allowedIPs) ?? []) }
             if rest.contains("--json") {
@@ -60,15 +69,20 @@ enum CLI {
             for (t, r) in rows { print("\(t.isUp ? "up  " : "down")  \(t.name.padding(toLength: 16, withPad: " ", startingAt: 0)) \(r.isEmpty ? "(config not readable)" : r.joined(separator: ", "))") }
             return 0
         case "conflicts":
-            let all = listTunnels().compactMap { t in configText(t).map { (name: t.name, conf: $0) } }
+            let tunnels = listTunnels()
+            let all = tunnels.compactMap { t in configText(t).map { (name: t.name, conf: $0) } }
+            let skipped = tunnels.map(\.name).filter { n in !all.contains { $0.name == n } }
             var found: [String] = []
             for (i, t) in all.enumerated() {
                 // Each pair once: compare with later tunnels only; per-tunnel checks run for every tunnel.
                 found += conflicts(name: t.name, conf: t.conf, others: Array(all[(i + 1)...]))
             }
             found.forEach { print($0) }
-            if found.isEmpty { print("no conflicts between \(all.count) tunnels") }
-            return found.isEmpty ? 0 : 1
+            if !skipped.isEmpty {
+                fputs("not checked (config not readable, turn on passwordless mode to inspect root-owned configs): \(skipped.joined(separator: ", "))\n", stderr)
+            }
+            if found.isEmpty && skipped.isEmpty { print("no conflicts between \(all.count) tunnels") }
+            return !found.isEmpty ? 1 : skipped.isEmpty ? 0 : 4
         case "dns":
             let dir = "/etc/resolver"
             let files = ((try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []).sorted()
@@ -105,7 +119,7 @@ enum CLI {
         if json {
             let items: [[String: Any]] = tunnels.map { t in
                 let s = stats[t.name]
-                var d: [String: Any] = ["name": t.name, "up": t.isUp, "path": t.path,
+                var d: [String: Any] = ["name": t.name, "up": t.isUp, "state": "\(t.state)", "path": t.path,
                                         "autoConnect": AutoConnect.tunnels.contains(t.name)]
                 if let s {
                     d["interface"] = s.iface ?? NSNull()
@@ -119,7 +133,7 @@ enum CLI {
             return printJSON(["tunnels": items])
         }
         for t in tunnels {
-            var line = "\(t.isUp ? "up  " : "down")  \(t.name.padding(toLength: 16, withPad: " ", startingAt: 0))"
+            var line = "\(label(t.state))  \(t.name.padding(toLength: 16, withPad: " ", startingAt: 0))"
             if let s = stats[t.name] {
                 line += " \(s.iface ?? "-")  \(s.address ?? "-")  ↓\(formatBytes(s.rx)) ↑\(formatBytes(s.tx))"
                 if let h = s.handshake { line += "  handshake \(formatAgo(h))" }
@@ -128,6 +142,8 @@ enum CLI {
         }
         return 0
     }
+
+    static func label(_ s: Tunnel.State) -> String { s == .up ? "up  " : s == .down ? "down" : "?   " }
 
     /// Every JSON document carries a schema version.
     static func printJSON(_ body: [String: Any]) -> Int32 {
@@ -138,7 +154,10 @@ enum CLI {
         return 0
     }
 
-    static func setState(_ names: [String], up: Bool) -> Int32 {
+    static func setState(_ names: [String], up: Bool) -> Int32 { withLock { apply(names, up: up) } }
+
+    /// Runs `body` holding the app/CLI operation lock (waits up to 60 s for the app).
+    static func withLock(_ body: () -> Int32) -> Int32 {
         var lock = OpLock.acquire(wait: 0)
         if lock == nil {
             fputs("waiting for another WGToggle operation to finish…\n", stderr)
@@ -146,6 +165,11 @@ enum CLI {
         }
         guard let lock else { fputs("wgtoggle: still busy after 60s, giving up\n", stderr); return 1 }
         defer { OpLock.release(lock) }
+        return body()
+    }
+
+    /// Connects/disconnects without taking the lock (callers hold it).
+    static func apply(_ names: [String], up: Bool) -> Int32 {
         let all = listTunnels()
         let verb = up ? "up" : "down"
         var rc: Int32 = 0
@@ -175,8 +199,8 @@ enum CLI {
 
     /// Runs Homebrew's wg-quick through sudo in the user's terminal (sudo asks for the password there).
     static func sudoWgQuick(_ verb: String, _ path: String) -> Bool {
-        let tools = Helper.isInstalled ? Helper.dir : (findBinary("wg-quick") as NSString?)?.deletingLastPathComponent
-        guard let tools, let bash = Helper.isInstalled ? "\(Helper.dir)/bash" : findBinary("bash") else {
+        let tools = Helper.toolsInstalled ? Helper.dir : (findBinary("wg-quick") as NSString?)?.deletingLastPathComponent
+        guard let tools, let bash = Helper.toolsInstalled ? "\(Helper.dir)/bash" : findBinary("bash") else {
             fputs("wgtoggle: wg-quick not found. brew install wireguard-tools\n", stderr)
             return false
         }

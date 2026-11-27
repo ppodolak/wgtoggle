@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 1.7.0 - 2026-11-27
+
+### Added
+- **Settings → Use Root-Owned wg-quick**: root-owned tool copies without passwordless mode. Password prompts stay; Homebrew's user-writable files are no longer run as root.
+- `wgtoggle profile` switches under one lock, verifies the result and restores the previous tunnels if the switch fails.
+- `wgtoggle conflicts` exits with `4` and names the tunnels it couldn't inspect instead of reporting success.
+- IPv6-only tunnels are detected and monitored.
+
+### Changed
+- Shared split DNS keeps each tunnel's nameservers: when one tunnel disconnects, the resolver is rebuilt from a tunnel that's still running. A resolver file that existed before WGToggle is restored afterwards.
+- A tunnel whose state can't be verified (unreadable config, no helper) is shown as "status unknown" instead of up.
+- Version comparison handles prereleases (`1.7.0` is newer than `1.7.0-beta.2`).
+
+### Fixed
+- A scheduled automatic restart could reconnect a tunnel you had disconnected in the meantime.
+
 ## 1.6.0 - 2026-11-27
 
 ### Added

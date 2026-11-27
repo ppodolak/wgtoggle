@@ -646,6 +646,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func tunnelTitle(_ t: Tunnel) -> NSAttributedString {
         let s = NSMutableAttributedString(string: t.name, attributes: [.font: NSFont.menuFont(ofSize: 0)])
+        if t.state == .unknown {
+            s.append(NSAttributedString(string: "\nstatus unknown: config not readable", attributes: [
+                .font: NSFont.menuFont(ofSize: NSFont.smallSystemFontSize), .foregroundColor: NSColor.secondaryLabelColor]))
+            return s
+        }
         guard t.isUp, let st = stats[t.name] else { return s }
         var parts: [String] = []
         if st.stuck { parts.append("⚠︎ stuck: no replies") }
@@ -687,7 +692,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         restarts[name, default: []].append(Date())
         Log.info("\(name): restarting in \(Int(delay))s")
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in self?.restart(t) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            // The user may have disconnected it (or turned auto-restart off) while we waited.
+            guard let self, AutoConnect.restartStuck, !self.userDisconnected.contains(name),
+                  let current = listTunnels().first(where: { $0.name == name }), current.isUp else {
+                Log.info("\(name): scheduled restart cancelled"); return
+            }
+            self.restart(current)
+        }
     }
 
     func restart(_ t: Tunnel) {
@@ -758,6 +770,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return submenu("Settings", [
             Helper.needsUpdate ? item("Update Passwordless Helper…", #selector(updateHelper))
                 : toggle("Passwordless Mode", Helper.isInstalled, #selector(togglePasswordless)),
+            toggle("Use Root-Owned wg-quick", Helper.toolsInstalled, #selector(toggleTrustedTools)),
             toggle("Restart Stuck Tunnels Automatically", AutoConnect.restartStuck, #selector(toggleAutoRestart)),
             .separator(),
             toggle("Global Shortcut \(HotKey.label) (Toggle All)", HotKey.enabled, #selector(toggleHotKey)),
@@ -801,6 +814,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard a.runModal() == .alertFirstButtonReturn else { return }
         Log.info("installing helper; moving: \(movable.map(\.name).joined(separator: ", "))")
         runTask(what: "install helper", status: "Installing helper…") { try Helper.install(movingConfigs: movable) }
+    }
+
+    /// Root-owned copies of wg-quick & co. without the sudo rule: password prompts stay, but nothing
+    /// running as you can swap the tools that run as root.
+    @objc func toggleTrustedTools() {
+        if Helper.isInstalled { alert("Part of passwordless mode", "Passwordless mode already uses the root-owned copies. Turn it off to remove them."); return }
+        if Helper.toolsInstalled {
+            runTask(what: "remove tool copies", status: "Removing…") { try runAsAdmin("rm -rf \(shellQuote(Helper.dir))") }
+        } else {
+            guard confirm("Install root-owned copies of wg-quick, wg, wireguard-go and bash into \(Helper.dir)?\n\nConnecting still asks for your password, but uses these copies instead of Homebrew's user-writable files. Re-run after brew upgrade wireguard-tools.", button: "Install") else { return }
+            runTask(what: "install tool copies", status: "Installing…") { try Helper.install(movingConfigs: [], sudoers: false) }
+        }
     }
 
     /// Reinstall the helper (newer script, fresh copies of the Homebrew tools). One admin prompt.
