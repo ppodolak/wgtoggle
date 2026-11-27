@@ -21,6 +21,7 @@ extension AppDelegate {
         guard !allowed.isEmpty else { return }
         let verb = up ? "up" : "down"
         if up { allowed.forEach { userDisconnected.remove($0.name) } } else { allowed.forEach { userDisconnected.insert($0.name) } }
+        allowed.forEach { sharedConfigSuspects.remove($0.name); stuckEpisodes[$0.name] = nil }   // user took over
         Log.info("wg-quick \(verb): \(allowed.map(\.name).joined(separator: ", "))")
         // "up" stops at the first failure; "down" keeps going so one bad tunnel doesn't strand others.
         // Passwordless for root-owned /etc/wireguard configs when the helper is installed.
@@ -173,6 +174,17 @@ extension AppDelegate {
     }
 
     func handleStuck(_ name: String) {
+        stuckEpisodes[name] = (stuckEpisodes[name] ?? []).filter { Date().timeIntervalSince($0) < 15 * 60 } + [Date()]
+        // Stuck → works again → stuck again: the classic sign of one config (one key) used on two devices.
+        // Restarting would only pull the connection back here and break the other device, so stop.
+        if suspectSharedConfig(episodes: stuckEpisodes[name] ?? []) {
+            if sharedConfigSuspects.insert(name).inserted {
+                Log.warn("\(name): stuck again shortly after working, likely the same config on another device; auto-restart paused")
+                Notify.error("\(name) is probably used on another device",
+                             "It keeps losing replies after working. One WireGuard config (one key) can only be connected on one device at a time. Create a separate config for each device in your VPN portal. Auto-restart is paused for this tunnel.")
+            }
+            return
+        }
         Log.warn("\(name) looks stuck: traffic goes out but nothing comes back")
         Notify.error("\(name) looks stuck", AutoConnect.restartStuck
             ? "Traffic goes out but nothing comes back. Restarting it…"

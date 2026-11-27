@@ -18,6 +18,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var pathMonitor: NWPathMonitor?
     var userDisconnected = Set<String>()
     var restarts: [String: [Date]] = [:]
+    var stuckEpisodes: [String: [Date]] = [:]
+    var sharedConfigSuspects = Set<String>()   // auto-restart paused for these
     /// Privileged commands run one at a time on this queue so the UI (and the icon animation) stays live.
     let adminQueue = DispatchQueue(label: "wgtoggle.admin")
     var busy: String?            // e.g. "Connecting wg-dev…" while a command runs

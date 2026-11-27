@@ -157,7 +157,8 @@ extension AppDelegate {
         }
         guard t.isUp, let st = stats[t.name] else { return s }
         var parts: [String] = []
-        if st.stuck { parts.append("⚠︎ stuck: no replies") }
+        if sharedConfigSuspects.contains(t.name) { parts.append("⚠︎ config probably in use on another device") }
+        else if st.stuck { parts.append("⚠︎ stuck: no replies") }
         if !st.stalePeers.isEmpty { parts.append("⚠︎ peer \(st.stalePeers.joined(separator: ", ")) not responding") }
         if let h = st.handshake { parts.append("handshake \(formatAgo(h))") }
         if st.iface != nil { parts.append("↓\(formatBytes(st.rx)) ↑\(formatBytes(st.tx))") }
@@ -165,7 +166,7 @@ extension AppDelegate {
         guard !parts.isEmpty else { return s }
         s.append(NSAttributedString(string: "\n" + parts.joined(separator: " · "), attributes: [
             .font: NSFont.menuFont(ofSize: NSFont.smallSystemFontSize),
-            .foregroundColor: st.stuck || !st.stalePeers.isEmpty ? NSColor.systemOrange : NSColor.secondaryLabelColor,
+            .foregroundColor: st.stuck || !st.stalePeers.isEmpty || sharedConfigSuspects.contains(t.name) ? NSColor.systemOrange : NSColor.secondaryLabelColor,
         ]))
         return s
     }

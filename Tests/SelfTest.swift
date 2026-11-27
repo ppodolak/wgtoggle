@@ -187,6 +187,12 @@ do {
     try? FileManager.default.removeItem(atPath: parts[0])
 }
 
+print("shared config detection")
+let n0 = Date()
+check(!suspectSharedConfig(episodes: [n0], now: n0), "one stuck episode: just stuck")
+check(suspectSharedConfig(episodes: [n0.addingTimeInterval(-300), n0], now: n0), "stuck again within 15 min: shared config suspected")
+check(!suspectSharedConfig(episodes: [n0.addingTimeInterval(-3600), n0], now: n0), "episodes far apart aren't a pattern")
+
 print("restart backoff")
 let now = Date()
 check(restartDelay(previous: [], now: now) == 10, "first restart after 10s")

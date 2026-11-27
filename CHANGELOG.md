@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.13.0 - 2026-11-27
+
+### Added
+- Detects a config that's probably connected on another device (stuck again shortly after recovering): explains it in a notification and in the menu, and pauses auto-restart for that tunnel so the two devices don't keep stealing the connection from each other. Connecting manually clears it.
+
 ## 1.12.2 - 2026-11-27
 
 ### Fixed

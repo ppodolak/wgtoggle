@@ -337,6 +337,7 @@ WGToggle/
 | Launch at Login fails | Move the app to `/Applications` first. |
 | No notifications appear | System Settings → Notifications → **WGToggle** → Allow. Also check the **Notifications** item in the menu. |
 | A private hostname doesn't resolve but the tunnel works | Your router may block public names that point to private IPs (DNS rebinding protection). Add a hook that sends that domain to another DNS server, e.g. `PostUp = mkdir -p /etc/resolver && printf 'nameserver 1.1.1.1\n' > /etc/resolver/example.com` and `PostDown = rm -f /etc/resolver/example.com`. |
+| "Probably used on another device" | The same config (same key) is connected on two computers, so the server keeps switching between them and each one loses replies in turn. WGToggle notices when a tunnel goes stuck again shortly after working and pauses auto-restart for it (restarting would only fight the other device). Create a separate config per device in your VPN portal. Connecting the tunnel manually clears the warning. |
 | Tunnel shows a ⚠︎ stuck warning | Traffic goes out but nothing comes back. Check whether the same config is active on another device, or turn on **Settings → Restart Stuck Tunnels Automatically**. |
 | Something else | Menu → **Log Explorer…**, or run `--diagnose`. |
 

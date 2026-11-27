@@ -194,3 +194,9 @@ func restartDelay(previous: [Date], now: Date = Date()) -> TimeInterval? {
     let recent = previous.filter { now.timeIntervalSince($0) < 15 * 60 }
     return recent.count >= 3 ? nil : 10 * pow(2, Double(recent.count))
 }
+
+/// Two or more separate "stuck" episodes within 15 minutes (it recovered in between): most likely the same
+/// config, i.e. the same key, is connected on another device and the server keeps switching between them.
+func suspectSharedConfig(episodes: [Date], now: Date = Date()) -> Bool {
+    episodes.filter { now.timeIntervalSince($0) < 15 * 60 }.count >= 2
+}
