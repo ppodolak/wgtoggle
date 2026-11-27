@@ -161,6 +161,12 @@ print("privileged commands")
 let wq = wgQuick("up", "/tmp/a b.conf")
 check(wq.hasPrefix("'/") && wq.contains("/bash' '") && wq.hasSuffix("/wg-quick' up '/tmp/a b.conf'"), "wg-quick runs by absolute path with its own bash")
 
+print("hang protection")
+let started = Date()
+let timedOut = (try? Helper.run(["status"], timeout: 1, command: ["/bin/sleep", "30"])) == nil
+check(timedOut && Date().timeIntervalSince(started) < 5, "a hanging helper call gives up after its timeout (\(String(format: "%.1f", Date().timeIntervalSince(started)))s)")
+check((try? Helper.run(["x"], timeout: 5, command: ["/bin/echo", "hi"])) == "hi\n", "normal call returns its output")
+
 print("restart backoff")
 let now = Date()
 check(restartDelay(previous: [], now: now) == 10, "first restart after 10s")

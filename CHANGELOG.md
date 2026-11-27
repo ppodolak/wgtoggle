@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.12.1 - 2026-11-27
+
+### Fixed
+- The app could freeze if a helper call hung (for example a stuck `wireguard-go`): helper calls now time out (5 s for status, 60 s for connect/disconnect), the menu and icon read the cached status instead of waiting for sudo, and a slow call no longer blocks other readers.
+- Restart history per tunnel is trimmed to the last 15 minutes.
+
 ## 1.12.0 - 2026-11-27
 
 ### Changed

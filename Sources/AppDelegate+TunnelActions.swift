@@ -183,6 +183,7 @@ extension AppDelegate {
             return
         }
         restarts[name, default: []].append(Date())
+        restarts[name] = restarts[name]?.filter { Date().timeIntervalSince($0) < 15 * 60 }   // keep it bounded
         Log.info("\(name): restarting in \(Int(delay))s")
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             // The user may have disconnected it (or turned auto-restart off) while we waited.

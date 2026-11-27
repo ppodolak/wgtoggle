@@ -246,10 +246,14 @@ enum Helper {
     /// `status()` is a sudo call; `isUp` is asked many times per second while the menu is open.
     /// nil = the helper couldn't be asked (not the same as "no tunnels up").
     static func cachedStatus() -> [String: Status]? {
-        lock.lock(); defer { lock.unlock() }
-        if let (at, s) = cache, Date().timeIntervalSince(at) < 2 { return s }
-        let s = status()
-        cache = (Date(), s)
+        lock.lock()
+        let cached = cache
+        lock.unlock()
+        if let (at, s) = cached, Date().timeIntervalSince(at) < 2 { return s }
+        // The main thread never waits for sudo once there's any answer: the stats queue refreshes every 5 s.
+        if Thread.isMainThread, let (_, s) = cached { return s }
+        let s = status()   // outside the lock: a slow helper call must not block other readers
+        lock.lock(); cache = (Date(), s); lock.unlock()
         return s
     }
 
@@ -262,16 +266,29 @@ enum Helper {
 
     /// Runs the helper via `sudo -n` (never prompts). Returns combined output; throws on failure.
     @discardableResult
-    static func run(_ args: [String]) throws -> String {
+    /// Never blocks forever: a stuck `wg show` (e.g. a hung wireguard-go) would otherwise freeze the caller.
+    /// up/down may legitimately take a while; status/meta/version should answer in well under a second.
+    static func run(_ args: [String], timeout: TimeInterval? = nil, command: [String]? = nil) throws -> String {
+        let limit = timeout ?? (["up", "down", "dns-repair"].contains(args.first ?? "") ? 60 : 5)
         let p = Process()
         let pipe = Pipe()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
-        p.arguments = ["-n", path] + args
+        let cmd = command ?? (["/usr/bin/sudo", "-n", path] + args)   // `command`: tests only
+        p.executableURL = URL(fileURLWithPath: cmd[0])
+        p.arguments = Array(cmd.dropFirst())
         p.standardOutput = pipe
         p.standardError = pipe
+        let exited = DispatchSemaphore(value: 0)
+        p.terminationHandler = { _ in exited.signal() }
         try p.run()
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
+        var data = Data()
+        let readDone = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async { data = pipe.fileHandleForReading.readDataToEndOfFile(); readDone.signal() }
+        if exited.wait(timeout: .now() + limit) == .timedOut {
+            p.terminate()
+            if exited.wait(timeout: .now() + 2) == .timedOut { kill(p.processIdentifier, SIGKILL) }
+            throw NSError(domain: "WGToggle", code: -2, userInfo: [NSLocalizedDescriptionKey: "helper \(args.first ?? "") timed out after \(Int(limit))s"])
+        }
+        _ = readDone.wait(timeout: .now() + 2)
         let out = String(decoding: data, as: UTF8.self)
         guard p.terminationStatus == 0 else {
             throw NSError(domain: "WGToggle", code: Int(p.terminationStatus),
