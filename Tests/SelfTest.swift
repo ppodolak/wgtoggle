@@ -64,6 +64,22 @@ check(found.contains { $0.contains("10.0.0.0/40 is not a valid network") }, "inv
 check(found.contains { $0.contains("split DNS for corp") }, "shared resolver domain reported")
 check(conflicts(name: "b", conf: b, others: []).isEmpty, "clean config has no conflicts")
 
+print("per-peer health")
+let st = Helper.parseStatus("""
+office utun7 1764200000 900 5000
+peer office AAAAkeyA= 1764200000 800 2500
+peer office BBBBkeyB= 0 100 2500
+home utun8 1764100000 10 20
+garbage line
+""")
+check(st["office"]?.iface == "utun7" && st["office"]?.peers.count == 2 && st["home"]?.peers.isEmpty == true, "status parser: tunnels and peers")
+check(st["office"]?.peers[1].handshake == nil && st["office"]?.peers[0].tx == 2500, "status parser: peer fields")
+let t0 = Date()
+check(peerIsStale(txDelta: 5_000, handshake: nil, now: t0), "peer with traffic and no handshake is stale")
+check(peerIsStale(txDelta: 5_000, handshake: t0.addingTimeInterval(-300), now: t0), "peer with old handshake is stale")
+check(!peerIsStale(txDelta: 5_000, handshake: t0.addingTimeInterval(-30), now: t0), "peer with fresh handshake is fine")
+check(!peerIsStale(txDelta: 100, handshake: nil, now: t0), "idle peer isn't stale")
+
 print("restart backoff")
 let now = Date()
 check(restartDelay(previous: [], now: now) == 10, "first restart after 10s")

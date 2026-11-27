@@ -58,7 +58,7 @@ brew install --cask ppodolak/tap/wgtoggle
 - Notifications: a banner on connect, on disconnect (including changes made in a terminal) and on errors. Click an error to open the Log Explorer. Can be turned off in the menu.
 - Log Explorer: a native window with search, Info/Warn/Error filters, a tunnel filter, live updates, a detail pane, and copy/export/clear (**⌘L**).
 - Live stats: each tunnel shows traffic, last handshake and its IP. Hold ⌥ to copy the IP.
-- Health check: a tunnel is marked stuck when its handshake goes stale while traffic is flowing (passwordless mode), or when traffic goes out and nothing comes back. You get a notification, and it can be restarted automatically: after 10 s, 20 s and 40 s, then it gives up for 15 minutes.
+- Health check: a tunnel is marked stuck when its handshake goes stale while traffic is flowing (passwordless mode), or when traffic goes out and nothing comes back. You get a notification, and it can be restarted automatically: after 10 s, 20 s and 40 s, then it gives up for 15 minutes. For configs with several peers, each peer is checked on its own, so one working peer doesn't hide a dead one.
 - Passwordless mode: optional. Connect and disconnect without typing your password (see [Passwordless mode](#passwordless-mode)).
 - Split DNS on import: a config with `DNS = …, corp` can be converted so only `*.corp` lookups use the VPN's DNS.
 - Auto-connect: per tunnel, at launch. With passwordless mode also after wake, after network changes and when a tunnel drops.
@@ -259,7 +259,7 @@ A config is a secret (it holds your private key), and it's also code (wg-quick r
 - **The admin authorization is cached for a few minutes** after you type your password, as with any app that uses `do shell script … with administrator privileges`.
 - **Configs in `/etc/wireguard`** are root-owned and the app can't read them, so their hooks can't be shown. They're trusted because only root can write there.
 - **The app is ad-hoc signed and not notarized.** Build it yourself, or check where your copy came from.
-- **`brew install`** runs as your user and trusts Homebrew's own security.
+- **`brew install`** runs as your user and trusts Homebrew's own security. The root-owned tool copies are taken from your Homebrew install; WGToggle can't verify where those files came from, because anything running as you could also change Homebrew or WGToggle itself.
 
 ### Recommendations
 
@@ -300,7 +300,11 @@ WGToggle/
 ├── build.sh                  # build, sign, package
 ├── Sources/
 │   ├── main.swift            # entry point (app or command line)
-│   ├── AppDelegate.swift     # menu bar UI, import/edit, settings
+│   ├── AppDelegate.swift     # app state, launch, icon
+│   ├── AppDelegate+MenuBar.swift        # menu bar, Dock and app menus
+│   ├── AppDelegate+TunnelActions.swift  # connect/disconnect, health, auto-connect, profiles
+│   ├── AppDelegate+ConfigEditing.swift  # import, add, edit, remove configs
+│   ├── AppDelegate+SettingsActions.swift # settings, passwordless mode, updates, About
 │   ├── Core.swift            # tunnels, config parsing, conflicts, hook approval, logging, admin commands
 │   ├── CLI.swift             # wgtoggle command line tool
 │   ├── LogExplorer.swift     # SwiftUI log window
@@ -341,7 +345,7 @@ Ideas being considered, roughly in order. Suggestions welcome in [issues](https:
 - [ ] Route view in the app, conflicts highlighted before connecting
 - [x] Two tunnels sharing a split-DNS domain (marker-based hooks)
 - [x] Root-owned tool copies without passwordless mode (**Settings → Use Root-Owned wg-quick**)
-- [ ] Per-peer health for configs with several peers
+- [x] Per-peer health for configs with several peers (passwordless mode)
 - [x] IPv6 overlap and `::/0` checks
 - [ ] Profiles by Wi-Fi network
 - [ ] Traffic history per tunnel

@@ -127,6 +127,10 @@ enum CLI {
                     d["rxBytes"] = s.rx
                     d["txBytes"] = s.tx
                     d["lastHandshake"] = s.handshake.map { ISO8601DateFormatter().string(from: $0) } ?? NSNull()
+                    d["peers"] = (Helper.cachedStatus()[t.name]?.peers ?? []).map { p in
+                        ["publicKey": p.key, "rxBytes": p.rx, "txBytes": p.tx,
+                         "lastHandshake": p.handshake.map { ISO8601DateFormatter().string(from: $0) } as Any? ?? NSNull()] as [String: Any]
+                    }
                 }
                 return d
             }

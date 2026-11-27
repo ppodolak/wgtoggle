@@ -14,6 +14,14 @@ struct TunnelStats {
     var tx: UInt64 = 0
     var handshake: Date?
     var stuck = false
+    /// Peers (short public key) that get traffic but haven't completed a handshake recently.
+    /// Only filled for tunnels with several peers, in passwordless mode.
+    var stalePeers: [String] = []
+}
+
+/// A peer is stale when data was sent to it during the window but its handshake is old or missing.
+func peerIsStale(txDelta: UInt64, handshake: Date?, now: Date = Date(), limit: TimeInterval = HealthMonitor.handshakeLimit) -> Bool {
+    txDelta > 2_000 && (handshake.map { now.timeIntervalSince($0) > limit } ?? true)
 }
 
 /// iface → (first IPv4 address, all IPv4/IPv6 addresses, rx bytes, tx bytes)
@@ -91,14 +99,17 @@ final class HealthMonitor {
     private var samples: [String: [(Date, UInt64, UInt64)]] = [:]
     private(set) var stats: [String: TunnelStats] = [:]
     private var notifiedStuck = Set<String>()
+    private var peerSamples: [String: [(Date, UInt64)]] = [:]
+    private var notifiedPeers = Set<String>()
 
     /// Called every few seconds off the main thread.
-    func sample(tunnels: [Tunnel]) -> (stats: [String: TunnelStats], newlyStuck: [String]) {
+    func sample(tunnels: [Tunnel]) -> (stats: [String: TunnelStats], newlyStuck: [String], newlyStalePeers: [(String, String)]) {
         let table = interfaceTable()
         let helper = Helper.cachedStatus()
         let now = Date()
         var newStats: [String: TunnelStats] = [:]
         var newlyStuck: [String] = []
+        var newlyStalePeers: [(String, String)] = []
 
         for t in tunnels where t.isUp {
             var s = TunnelStats()
@@ -131,13 +142,31 @@ final class HealthMonitor {
                     s.stuck = txDelta > 2_000 && rxDelta < 400
                 }
             }
+            // Per peer (multi-peer configs): one healthy peer must not hide a dead one.
+            if let peers = helper[t.name]?.peers, peers.count > 1 {
+                for p in peers {
+                    let key = "\(t.name)/\(p.key)"
+                    var hist = (peerSamples[key] ?? []).filter { now.timeIntervalSince($0.0) <= Self.window + 10 }
+                    if let o = hist.first, p.tx < o.1 { hist = [] }   // counters reset
+                    hist.append((now, p.tx))
+                    peerSamples[key] = hist
+                    let short = String(p.key.prefix(8)) + "…"
+                    if let o = hist.first, now.timeIntervalSince(o.0) >= Self.window,
+                       peerIsStale(txDelta: p.tx - o.1, handshake: p.handshake, now: now) {
+                        s.stalePeers.append(short)
+                        if notifiedPeers.insert(key).inserted { newlyStalePeers.append((t.name, short)) }
+                    } else {
+                        notifiedPeers.remove(key)
+                    }
+                }
+            }
             if s.stuck && !notifiedStuck.contains(t.name) { newlyStuck.append(t.name); notifiedStuck.insert(t.name) }
             if !s.stuck { notifiedStuck.remove(t.name) }
             newStats[t.name] = s
         }
         for name in samples.keys where newStats[name] == nil { samples[name] = nil; notifiedStuck.remove(name) }
         stats = newStats
-        return (newStats, newlyStuck)
+        return (newStats, newlyStuck, newlyStalePeers)
     }
 }
 

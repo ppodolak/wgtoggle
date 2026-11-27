@@ -46,7 +46,7 @@ enum Helper {
       [[ $(( 0$(stat -f %Lp "$conf") & 022 )) == 0 ]] || { echo "$conf is group/world writable" >&2; exit 2; }
     }
     case "$cmd" in
-      version) echo 2 ;;
+      version) echo 3 ;;
       up|down)
         check_conf
         exec "$H/bash" "$H/wg-quick" "$cmd" "$conf" ;;
@@ -63,6 +63,11 @@ enum Helper {
           hs=$("$H/wg" show "$i" latest-handshakes 2>/dev/null | awk '{print $2}' | sort -n | tail -1)
           tr=$("$H/wg" show "$i" transfer 2>/dev/null | awk '{r+=$2; t+=$3} END {print r+0, t+0}')
           echo "$n $i ${hs:-0} ${tr:-0 0}"
+          # one line per peer: peer NAME PUBLICKEY HANDSHAKE RX TX (public keys only; no `wg show dump`, it prints the private key)
+          "$H/wg" show "$i" latest-handshakes 2>/dev/null | while read -r k t; do
+            ptr=$("$H/wg" show "$i" transfer 2>/dev/null | awk -v k="$k" '$1 == k {print $2, $3}')
+            echo "peer $n $k ${t:-0} ${ptr:-0 0}"
+          done
         done ;;
       *) echo "usage: wgtoggle-helper up|down|meta NAME | status | version" >&2; exit 2 ;;
     esac
@@ -164,7 +169,7 @@ enum Helper {
     }
 
     /// Bump when the helper script changes; older installs get an "update" prompt.
-    static let currentVersion = 2
+    static let currentVersion = 3
 
     static var installedVersion: Int {
         guard isInstalled else { return 0 }
@@ -215,15 +220,25 @@ enum Helper {
         return out
     }
 
-    struct Status { let iface: String; let handshake: Date?; let rx: UInt64; let tx: UInt64 }
+    struct Peer { let key: String; let handshake: Date?; let rx: UInt64; let tx: UInt64 }
+    struct Status { let iface: String; let handshake: Date?; let rx: UInt64; let tx: UInt64; var peers: [Peer] = [] }
 
     static func status() -> [String: Status] {
         guard isInstalled, let out = try? run(["status"]) else { return [:] }
+        return parseStatus(out)
+    }
+
+    /// `name iface hs rx tx` per tunnel, then `peer name key hs rx tx` per peer (helper v3+).
+    static func parseStatus(_ out: String) -> [String: Status] {
         var r: [String: Status] = [:]
+        let date = { (t: TimeInterval) in t > 0 ? Date(timeIntervalSince1970: t) : nil }
         for line in out.split(separator: "\n") {
             let f = line.split(separator: " ").map(String.init)
-            guard f.count == 5, let hs = TimeInterval(f[2]), let rx = UInt64(f[3]), let tx = UInt64(f[4]) else { continue }
-            r[f[0]] = Status(iface: f[1], handshake: hs > 0 ? Date(timeIntervalSince1970: hs) : nil, rx: rx, tx: tx)
+            if f.count == 5, let hs = TimeInterval(f[2]), let rx = UInt64(f[3]), let tx = UInt64(f[4]) {
+                r[f[0]] = Status(iface: f[1], handshake: date(hs), rx: rx, tx: tx, peers: r[f[0]]?.peers ?? [])
+            } else if f.count == 6, f[0] == "peer", let hs = TimeInterval(f[3]), let rx = UInt64(f[4]), let tx = UInt64(f[5]) {
+                r[f[1]]?.peers.append(Peer(key: f[2], handshake: date(hs), rx: rx, tx: tx))
+            }
         }
         return r
     }

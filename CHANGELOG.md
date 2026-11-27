@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.8.0 - 2026-11-27
+
+### Added
+- Per-peer health for configs with several peers (passwordless mode): a peer that gets traffic but no handshake is shown in the menu and notified, even when other peers work. `wgtoggle status --json` lists peers.
+
+### Changed
+- Passwordless helper v3 (per-peer status). **Settings → Update Passwordless Helper…** appears if you use passwordless mode.
+- `AppDelegate.swift` split into extensions: menu bar, tunnel actions, config editing, settings.
+
 ## 1.7.0 - 2026-11-27
 
 ### Added

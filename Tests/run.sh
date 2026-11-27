@@ -6,7 +6,7 @@ T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 # Everything except the app entry point and the menu bar UI
 for f in Sources/*.swift; do
-  case "$(basename "$f")" in main.swift|AppDelegate.swift) ;; *) cp "$f" "$T/" ;; esac
+  case "$(basename "$f")" in main.swift|AppDelegate*.swift) ;; *) cp "$f" "$T/" ;; esac
 done
 cp Tests/SelfTest.swift "$T/main.swift"
 swiftc -o "$T/selftest" "$T"/*.swift
