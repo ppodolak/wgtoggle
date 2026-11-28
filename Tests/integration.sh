@@ -51,8 +51,11 @@ grep -q '"interface"' <<< "$("$W" status --json)" || fail "no interface in statu
 "$W" down ci
 [[ "$(state ci)" == down ]] || fail "expected down via helper"
 
-echo "== reinstall over an existing install (transaction path), then uninstall"
+echo "== reinstall over an existing install (the app's update path), then uninstall"
+"$APP/Contents/MacOS/WGToggle" --diagnose --print-installer > /tmp/wgt-install.sh
 sudo /bin/bash /tmp/wgt-install.sh
+[[ -f /etc/wireguard/ci.conf ]] || fail "config lost on reinstall"
+"$W" up ci; [[ "$(state ci)" == up ]] || fail "up after reinstall"; "$W" down ci
 [[ ! -e /var/db/wgtoggle-install.journal ]] || fail "journal left after a committed install"
 sudo rm -f /etc/sudoers.d/wgtoggle && sudo rm -rf /Library/PrivilegedHelperTools/wgtoggle /etc/wireguard/ci.conf
 echo "== connectivity check and Network Inspector data path"

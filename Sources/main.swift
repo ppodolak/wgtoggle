@@ -6,7 +6,8 @@ if let i = CommandLine.arguments.firstIndex(of: "cli") {
 }
 if CommandLine.arguments.contains("--diagnose") {
     if CommandLine.arguments.contains("--print-installer") {   // only the script, nothing else
-        print(Helper.installer(user: NSUserName(), moveFrom: listTunnels().map(\.path)))
+        // same as the app: only configs not already in the root-owned dir are moved
+        print(Helper.installer(user: NSUserName(), moveFrom: listTunnels().map(\.path).filter { !$0.hasPrefix(Helper.configDir + "/") }))
         exit(0)
     }
     exit(CLI.run(["diagnose"]))
