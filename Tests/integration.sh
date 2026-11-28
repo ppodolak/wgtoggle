@@ -57,9 +57,9 @@ sudo /bin/bash /tmp/wgt-install.sh
 [[ -f /etc/wireguard/ci.conf ]] || fail "config lost on reinstall"
 "$W" up ci; [[ "$(state ci)" == up ]] || fail "up after reinstall"; "$W" down ci
 [[ ! -e /var/db/wgtoggle-install.journal ]] || fail "journal left after a committed install"
-sudo rm -f /etc/sudoers.d/wgtoggle && sudo rm -rf /Library/PrivilegedHelperTools/wgtoggle /etc/wireguard/ci.conf
-echo "== connectivity check and Network Inspector data path"
+echo "== connectivity check and settings"
 "$W" check ci 127.0.0.1:9 > /dev/null
 [[ "$("$W" check ci)" == "127.0.0.1:9" ]] || fail "check not stored"
 "$W" check ci --clear > /dev/null
+sudo rm -f /etc/sudoers.d/wgtoggle && sudo rm -rf /Library/PrivilegedHelperTools/wgtoggle /etc/wireguard/ci.conf
 echo "INTEGRATION PASSED"
