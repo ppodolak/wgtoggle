@@ -5,6 +5,7 @@ import ServiceManagement
 
 // MARK: - App
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     let menu = NSMenu()
@@ -24,34 +25,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let adminQueue = DispatchQueue(label: "wgtoggle.admin")
     var busy: String?            // e.g. "Connecting wg-dev…" while a command runs
     var blinkTimer: Timer?
+    var blinkPhase = 0
 
     func applicationDidFinishLaunching(_ note: Notification) {
         let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
         Log.info("WGToggle \(v) started; tunnels: \(listTunnels().map(\.name).joined(separator: ", "))")
+        Helper.uiMode = true
         Notify.setup()
         installMainMenu()
         Dock.apply()
         menu.delegate = self
         statusItem.menu = menu
         refreshIcon()
-        Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in self?.refreshIcon() }
+        // Timers and main-queue blocks run on the main thread; assumeIsolated tells the compiler so.
+        Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in MainActor.assumeIsolated { self?.refreshIcon() } }
         sampleStats()
-        Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in self?.sampleStats() }
+        Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in MainActor.assumeIsolated { self?.sampleStats() } }
         HotKey.action = { [weak self] in self?.toggleAllShortcut() }
         HotKey.apply()
         setupAutoConnect()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in self?.checkForUpdates(manual: false) }
-        Timer.scheduledTimer(withTimeInterval: 24 * 3600, repeats: true) { [weak self] _ in self?.checkForUpdates(manual: false) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in MainActor.assumeIsolated { self?.checkForUpdates(manual: false) } }
+        Timer.scheduledTimer(withTimeInterval: 24 * 3600, repeats: true) { [weak self] _ in MainActor.assumeIsolated { self?.checkForUpdates(manual: false) } }
         Log.info("passwordless mode: \(Helper.isInstalled ? "on" : "off")")
-        // Older helper after an app update: features silently missing otherwise, so say it once per launch.
-        if Helper.needsUpdate {
-            Log.warn("passwordless helper v\(Helper.installedVersion) is older than v\(Helper.currentVersion)")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { Notify.helperUpdateNeeded(installed: Helper.installedVersion) }
-        }
-        // After a crash or reboot, resolvers of tunnels that aren't running anymore can be left behind.
-        if Helper.isInstalled && Helper.installedVersion >= 4 {
+        // Helper checks need `sudo -n` (the version call); never on the main thread.
+        if Helper.isInstalled {
             DispatchQueue.global().async {
-                if let out = try? Helper.run(["dns-repair"]), !out.contains("nothing to repair"), !out.isEmpty {
+                let v = Helper.installedVersion
+                // Older helper after an app update: features silently missing otherwise, so say it once per launch.
+                if v < Helper.currentVersion {
+                    Log.warn("passwordless helper v\(v) is older than v\(Helper.currentVersion)")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3) { Notify.helperUpdateNeeded(installed: v) }
+                }
+                // After a crash or reboot, resolvers of tunnels that aren't running anymore can be left behind.
+                if v >= 4, let out = try? Helper.run(["dns-repair"]), !out.contains("nothing to repair"), !out.isEmpty {
                     Log.info("dns repair at launch", detail: out.trimmingCharacters(in: .whitespacesAndNewlines))
                 }
             }

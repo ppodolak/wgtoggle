@@ -148,7 +148,7 @@ enum Updates {
     }
 
     /// Only sends a plain GET to api.github.com; no identifiers.
-    static func check(completion: @escaping (Release?, String?) -> Void) {
+    static func check(completion: @escaping @Sendable (Release?, String?) -> Void) {
         var req = URLRequest(url: URL(string: "https://api.github.com/repos/\(repo)/releases/latest")!)
         req.setValue("WGToggle", forHTTPHeaderField: "User-Agent")
         req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
@@ -172,9 +172,9 @@ enum HotKey {
         set { UserDefaults.standard.set(newValue, forKey: key) }
     }
     static let label = "⌃⌥⌘T"
-    private static var ref: EventHotKeyRef?
-    private static var handlerInstalled = false
-    static var action: (() -> Void)?
+    nonisolated(unsafe) private static var ref: EventHotKeyRef?
+    nonisolated(unsafe) private static var handlerInstalled = false
+    nonisolated(unsafe) static var action: (() -> Void)?
 
     static func apply() {
         if let ref { UnregisterEventHotKey(ref); self.ref = nil }

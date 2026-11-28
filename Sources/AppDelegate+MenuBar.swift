@@ -49,6 +49,11 @@ extension AppDelegate {
                     menu.addItem(alt)
                 }
             }
+            for name in sharedConfigSuspects.sorted() {
+                let mi = item("Resume Auto-restart for \(name)", #selector(resumeAutoRestart(_:)))
+                mi.representedObject = name
+                menu.addItem(mi)
+            }
             menu.addItem(.separator())
             menu.addItem(item("Connect All", #selector(allUp)))
             menu.addItem(item("Disconnect All", #selector(allDown)))
@@ -157,7 +162,7 @@ extension AppDelegate {
         }
         guard t.isUp, let st = stats[t.name] else { return s }
         var parts: [String] = []
-        if sharedConfigSuspects.contains(t.name) { parts.append("⚠︎ config probably in use on another device") }
+        if sharedConfigSuspects.contains(t.name) { parts.append("⚠︎ may be in use on another device, auto-restart paused") }
         else if st.stuck { parts.append("⚠︎ stuck: no replies") }
         if !st.stalePeers.isEmpty { parts.append("⚠︎ peer \(st.stalePeers.joined(separator: ", ")) not responding") }
         if let h = st.handshake { parts.append("handshake \(formatAgo(h))") }

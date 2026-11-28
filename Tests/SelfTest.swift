@@ -153,6 +153,13 @@ if findBinary("wg-quick") == nil {
     try! "backup \(T)/H\ncommitted\n".write(toFile: T + "/journal", atomically: true, encoding: .utf8)
     _ = run(script(breakCheck: true))   // its own (injected) failure only undoes its own changes
     check(ex("/H/previous") && !ex("/H.wgtoggle-bak") && !ex("/journal"), "committed install isn't rolled back by the next run")
+    // 6. power loss while the backup was being copied: original untouched, half backup discarded
+    try! "keep me".write(toFile: T + "/H/previous", atomically: true, encoding: .utf8)
+    try! fm.createDirectory(atPath: T + "/H.wgtoggle-bak.tmp", withIntermediateDirectories: true)   // partial copy
+    try! "backup-start \(T)/H\n".write(toFile: T + "/journal", atomically: true, encoding: .utf8)
+    _ = run(script(breakCheck: true))
+    check((try? String(contentsOfFile: T + "/H/previous", encoding: .utf8)) == "keep me" && !ex("/H.wgtoggle-bak.tmp") && !ex("/journal"),
+          "crash during backup copy: original kept, partial backup dropped")
     check(run(script()) == 0 && ex("/H/wgtoggle-helper") && !ex("/H/previous"), "next install then succeeds")
     try? fm.removeItem(atPath: T)
 }
@@ -171,7 +178,8 @@ print("detached admin job")
 do {
     func launch(_ cmd: String) -> (out: String, secs: Double) {
         let start = Date(), p = Process(), pipe = Pipe()
-        p.executableURL = URL(fileURLWithPath: "/bin/bash"); p.arguments = ["-c", detachedLauncher(cmd)]; p.standardOutput = pipe
+        p.executableURL = URL(fileURLWithPath: "/bin/bash")
+        p.arguments = ["-c", detachedLauncher(cmd, lock: NSTemporaryDirectory() + "wgtest.lock")]; p.standardOutput = pipe
         try! p.run()
         let out = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
         p.waitUntilExit()
@@ -184,6 +192,23 @@ do {
     Thread.sleep(forTimeInterval: 2.5)
     check((try? String(contentsOfFile: parts[0] + "/rc", encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) == "3"
           && (try? String(contentsOfFile: parts[1], encoding: .utf8)) == "done\n", "job's exit code and output are collected")
+    let perms = (try? FileManager.default.attributesOfItem(atPath: parts[1]))?[.posixPermissions] as? Int
+    check(perms == 0o600, "job output is private (0600)")
+    let (out2, _) = launch("echo 'PrivateKey = yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk='; echo ok")
+    let p2 = out2.split(separator: " ").map(String.init)
+    Thread.sleep(forTimeInterval: 0.6)
+    let o2 = (try? String(contentsOfFile: p2[1], encoding: .utf8)) ?? ""
+    check(o2.contains("PrivateKey = <redacted>") && !o2.contains("yAnz5TF"), "keys redacted before output reaches disk")
+    try? FileManager.default.removeItem(atPath: p2[0])
+    // two jobs at once: the second waits for the lock, so it sees what the first wrote
+    let marker = NSTemporaryDirectory() + "wgtest-order-\(UUID().uuidString.prefix(6))"
+    let (a1, _) = launch("sleep 1.5; echo first > \(marker)")
+    let (a2, _) = launch("cat \(marker)")
+    Thread.sleep(forTimeInterval: 2.5)
+    let o3 = (try? String(contentsOfFile: a2.split(separator: " ").map(String.init)[1], encoding: .utf8)) ?? ""
+    check(o3 == "first\n", "privileged jobs never overlap (second waited for the first)")
+    for d in [a1, a2] { try? FileManager.default.removeItem(atPath: String(d.split(separator: " ")[0])) }
+    try? FileManager.default.removeItem(atPath: marker)
     try? FileManager.default.removeItem(atPath: parts[0])
 }
 

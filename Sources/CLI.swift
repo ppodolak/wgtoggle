@@ -88,7 +88,7 @@ enum CLI {
                 }
                 let p = Process()
                 p.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
-                p.arguments = ["/bin/bash", "-c", SplitDNS.repairScript()]
+                p.arguments = ["/usr/bin/lockf", "-k", "-t", "120", rootLock, "/bin/bash", "-c", SplitDNS.repairScript()]
                 do { try p.run() } catch { return 1 }
                 p.waitUntilExit()
                 return p.terminationStatus == 0 ? 0 : 1
@@ -264,7 +264,8 @@ enum CLI {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
         // wg-quick needs bash 4+ and finds wg/wireguard-go via PATH, which sudo resets.
-        p.arguments = ["/usr/bin/env", "PATH=/usr/bin:/bin:/usr/sbin:/sbin:\(tools)", bash, "\(tools)/wg-quick", verb, path]
+        p.arguments = ["/usr/bin/lockf", "-k", "-t", "120", rootLock,
+                       "/usr/bin/env", "PATH=/usr/bin:/bin:/usr/sbin:/sbin:\(tools)", bash, "\(tools)/wg-quick", verb, path]
         do { try p.run() } catch { fputs("\(error.localizedDescription)\n", stderr); return false }
         p.waitUntilExit()
         return p.terminationStatus == 0

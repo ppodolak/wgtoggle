@@ -95,7 +95,8 @@ func exactCounters() -> [String: (rx: UInt64, tx: UInt64)] {
     return out
 }
 
-final class HealthMonitor {
+/// Only ever used from the app's stats queue (and once by the CLI), never concurrently.
+final class HealthMonitor: @unchecked Sendable {
     /// Seconds of "traffic out, nothing back" before a tunnel is called stuck.
     static let window: TimeInterval = 40
     static let handshakeLimit: TimeInterval = 200   // WireGuard re-handshakes every ~2 min under traffic

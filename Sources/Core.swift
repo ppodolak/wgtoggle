@@ -28,7 +28,7 @@ enum Log {
     static let file = demoMode ? URL(fileURLWithPath: NSTemporaryDirectory() + "wgtoggle-demo.log")
         : dir.appendingPathComponent("wgtoggle.log")
     static let queue = DispatchQueue(label: "wgtoggle.log")
-    static let stamp: ISO8601DateFormatter = {
+    nonisolated(unsafe) static let stamp: ISO8601DateFormatter = {   // ISO8601DateFormatter is thread-safe
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return f
@@ -332,6 +332,12 @@ func runAsAdmin(_ command: String, timeout: TimeInterval = 300) throws -> String
     // detached root job; this thread then waits for its result file.
     // Results live in a fresh root-owned 0711 dir in /tmp with an unguessable output file name, so other
     // users can't read the output and nothing running as this user can redirect root's writes.
+    if !RootJobs.stillRunning().isEmpty {
+        throw NSError(domain: "WGToggle", code: -4, userInfo: [NSLocalizedDescriptionKey: "a previous admin action is still running; try again when it has finished"])
+    }
+    guard NSUserName().range(of: "^[a-zA-Z0-9._-]+$", options: .regularExpression) != nil else {
+        throw NSError(domain: "WGToggle", code: 1, userInfo: [NSLocalizedDescriptionKey: "Unsupported user name"])
+    }
     let launcher = detachedLauncher(full)
     var launched: Result<String, Error>!
     DispatchQueue.main.sync { launched = Result { try appleScriptAdmin(launcher) } }
@@ -340,12 +346,15 @@ func runAsAdmin(_ command: String, timeout: TimeInterval = 300) throws -> String
         throw NSError(domain: "WGToggle", code: 1, userInfo: [NSLocalizedDescriptionKey: "couldn't start the admin command"])
     }
     let rcPath = parts[0] + "/rc", deadline = Date().addingTimeInterval(timeout)
+    RootJobs.add(parts[0])
     while !FileManager.default.fileExists(atPath: rcPath) {
         if Date() > deadline {
-            throw NSError(domain: "WGToggle", code: -2, userInfo: [NSLocalizedDescriptionKey: "admin command still running after \(Int(timeout))s"])
+            // Still running as root: it stays in RootJobs, which blocks new privileged work until it ends.
+            throw NSError(domain: "WGToggle", code: -2, userInfo: [NSLocalizedDescriptionKey: "admin action still running after \(Int(timeout))s; new admin actions wait until it finishes"])
         }
         Thread.sleep(forTimeInterval: 0.2)
     }
+    RootJobs.finished(parts[0])
     let out = (try? String(contentsOfFile: parts[1], encoding: .utf8)) ?? ""
     let rc = Int(((try? String(contentsOfFile: rcPath, encoding: .utf8)) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)) ?? 1
     guard rc == 0 else {
@@ -354,17 +363,43 @@ func runAsAdmin(_ command: String, timeout: TimeInterval = 300) throws -> String
     return out
 }
 
+/// One lock for every privileged change (admin jobs, helper up/down, dns repair, installs): root jobs from
+/// the app, the CLI or a second app instance never overlap. Root-owned path; lockf creates it as root.
+let rootLock = "/var/run/wgtoggle-root.lock"
+
 /// Shell that starts `full` in the background and immediately prints "<dir> <output file>"; the job writes
 /// its exit code to <dir>/rc when done.
-func detachedLauncher(_ full: String) -> String {
-    """
+/// - waits for `rootLock`, so it never overlaps another privileged WGToggle operation
+/// - output: keys redacted before it touches disk, file 0600 and handed to `user` only when complete,
+///   inside a fresh root-owned 0711 dir (unlistable; nothing running as the user can swap paths in it)
+/// - the dir is removed a minute after the job ends (and stale ones after 2 h)
+func detachedLauncher(_ full: String, user: String = NSUserName(), lock: String = rootLock) -> String {
+    let job = "set -o pipefail; ( \(full) ) 2>&1 | /usr/bin/sed -E 's/((Private|Preshared|private|preshared)[Kk]ey[[:space:]]*=[[:space:]]*)[^[:space:]]+/\\1<redacted>/'"
+    return """
     find /tmp -maxdepth 1 -name 'wgtoggle.*' -user root -mmin +120 -exec rm -rf {} + 2>/dev/null
     D=$(/usr/bin/mktemp -d /tmp/wgtoggle.XXXXXXXX) || exit 1
     /bin/chmod 711 "$D"
-    O=$(/usr/bin/mktemp "$D/o.XXXXXXXXXXXX") && /bin/chmod 644 "$O"
-    ( ( \(full) ) > "$O" 2>&1; echo $? > "$D/rc.tmp"; /bin/chmod 644 "$D/rc.tmp"; /bin/mv "$D/rc.tmp" "$D/rc" ) > /dev/null 2>&1 < /dev/null &
+    O=$(/usr/bin/mktemp "$D/o.XXXXXXXXXXXX") && /bin/chmod 600 "$O"
+    ( /usr/bin/lockf -k -t 600 \(shellQuote(lock)) /bin/bash -c \(shellQuote(job)) > "$O" 2>&1
+      echo $? > "$D/rc.tmp"; /usr/sbin/chown \(shellQuote(user)) "$O"; /bin/chmod 644 "$D/rc.tmp"; /bin/mv "$D/rc.tmp" "$D/rc"
+      sleep 60; /bin/rm -rf "$D" ) > /dev/null 2>&1 < /dev/null &
     echo "$D $O"
     """
+}
+
+/// Root jobs this app started that haven't reported back yet (e.g. after a timeout). New privileged work
+/// is refused until they finish, so a timed-out job can't overlap the next one.
+enum RootJobs {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var pending: [String] = []
+    static func add(_ dir: String) { lock.lock(); pending.append(dir); lock.unlock() }
+    static func finished(_ dir: String) { lock.lock(); pending.removeAll { $0 == dir }; lock.unlock() }
+    /// Dirs of jobs still running (finished ones are dropped).
+    static func stillRunning() -> [String] {
+        lock.lock(); defer { lock.unlock() }
+        pending.removeAll { FileManager.default.fileExists(atPath: $0 + "/rc") || !FileManager.default.fileExists(atPath: $0) }
+        return pending
+    }
 }
 
 /// `do shell script … with administrator privileges`. Must run on the main thread (that's where macOS shows
@@ -389,7 +424,7 @@ enum Dock {
         get { UserDefaults.standard.bool(forKey: key) }
         set { UserDefaults.standard.set(newValue, forKey: key) }
     }
-    static func apply() {
+    @MainActor static func apply() {
         NSApp.setActivationPolicy(visible ? .regular : .accessory)
         if visible { NSApp.activate(ignoringOtherApps: true) }
     }

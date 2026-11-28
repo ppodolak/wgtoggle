@@ -9,5 +9,6 @@ for f in Sources/*.swift; do
   case "$(basename "$f")" in main.swift|AppDelegate*.swift) ;; *) cp "$f" "$T/" ;; esac
 done
 cp Tests/SelfTest.swift "$T/main.swift"
-swiftc -o "$T/selftest" "$T"/*.swift
+# SANITIZE=thread Tests/run.sh: same tests under Thread Sanitizer
+swiftc ${SANITIZE:+-sanitize=$SANITIZE} -o "$T/selftest" "$T"/*.swift
 "$T/selftest"

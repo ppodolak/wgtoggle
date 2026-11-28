@@ -47,12 +47,12 @@ enum Helper {
       [[ $(( 0$(stat -f %Lp "$conf") & 022 )) == 0 ]] || { echo "$conf is group/world writable" >&2; exit 2; }
     }
     case "$cmd" in
-      version) echo 6 ;;
+      version) echo 7 ;;
       dns-repair)
-        \#(SplitDNS.repairScript()) ;;
+        exec /usr/bin/lockf -k -t 120 \#(rootLock) /bin/bash -c \#(shellQuote(SplitDNS.repairScript())) ;;
       up|down)
         check_conf
-        exec "$H/bash" "$H/wg-quick" "$cmd" "$conf" ;;
+        exec /usr/bin/lockf -k -t 120 \#(rootLock) "$H/bash" "$H/wg-quick" "$cmd" "$conf" ;;
       meta)
         # Routing/DNS/hook lines for conflict checks. Never prints PrivateKey or PresharedKey.
         check_conf
@@ -110,15 +110,19 @@ enum Helper {
         # "committed" = just finish the cleanup.
         J=\#(journal)
         mkdir -p "$(dirname "$J")"
-        undo() {   # replay the journal backwards
+        undo() {   # replay the journal backwards; keep the journal unless every step worked
           set +e
-          tail -r "$J" 2>/dev/null | while IFS=' ' read -r op path; do
+          local failed=0
+          while IFS=' ' read -r op path; do
             case "$op" in
-              new) rm -rf "$path" ;;                                   # created by us: remove
-              backup) if [[ -e "$path.wgtoggle-bak" ]]; then rm -rf "$path"; mv "$path.wgtoggle-bak" "$path"; fi ;;
+              new) rm -rf "$path" || failed=1 ;;                                       # created by us: remove
+              backup-start) rm -rf "$path.wgtoggle-bak.tmp" ;;                         # backup never finished; original untouched
+              backup) if [[ -e "$path.wgtoggle-bak" ]]; then rm -rf "$path" && mv "$path.wgtoggle-bak" "$path" || failed=1; fi ;;
             esac
-          done
-          rm -f "$J"
+          done < <(tail -r "$J" 2>/dev/null)
+          if [[ $failed == 0 ]]; then rm -f "$J"; else echo "rollback incomplete, journal kept at $J" >&2; fi
+          /bin/sync
+          return $failed
         }
         finish() {   # committed: drop the backups
           set +e
@@ -127,12 +131,25 @@ enum Helper {
         }
         if [[ -e "$J" ]]; then
           if grep -qx committed "$J"; then echo "finishing an earlier install" >&2; finish
-          else echo "recovering interrupted install" >&2; undo; fi
+          else echo "recovering interrupted install" >&2; undo || { echo "can't recover the earlier install, see $J" >&2; exit 1; }; fi
         fi
         rm -rf "$H".new.*
         : > "$J"; chmod 600 "$J"
         # Journal a path, then back it up (or note it as new). Call BEFORE changing the path.
-        touchpath() { if [[ -e "$1" ]]; then echo "backup $1" >> "$J"; rm -rf "$1.wgtoggle-bak"; cp -Rp "$1" "$1.wgtoggle-bak"; else echo "new $1" >> "$J"; fi; }
+        # Crash-safe: the backup is made under a temp name, verified, then published with an atomic rename.
+        # Only a published backup ("backup" line) is ever restored; the original is changed only after that.
+        touchpath() {
+          if [[ -e "$1" ]]; then
+            echo "backup-start $1" >> "$J"; /bin/sync
+            rm -rf "$1.wgtoggle-bak.tmp" "$1.wgtoggle-bak"
+            cp -Rp "$1" "$1.wgtoggle-bak.tmp"
+            diff -rq "$1" "$1.wgtoggle-bak.tmp" > /dev/null || { echo "backup of $1 doesn't match" >&2; exit 1; }
+            mv "$1.wgtoggle-bak.tmp" "$1.wgtoggle-bak"
+            echo "backup $1" >> "$J"; /bin/sync
+          else
+            echo "new $1" >> "$J"; /bin/sync
+          fi
+        }
         COMMITTED=0
         trap 'rc=$?; if [[ $rc -ne 0 && $COMMITTED == 0 ]]; then echo "install failed, rolling back" >&2; undo; fi' EXIT
         BREW=""
@@ -176,7 +193,7 @@ enum Helper {
         # explicit exits: /bin/bash 3.2 does not apply set -e to a failing [[ ]]
         "$H/bash" -c 'exit 0' || { echo "installed bash does not run" >&2; exit 1; }
         [[ "$("$H/wgtoggle-helper" version)" == \#(currentVersion) ]] || { echo "installed helper does not answer" >&2; exit 1; }
-        echo committed >> "$J"; COMMITTED=1
+        echo committed >> "$J"; /bin/sync; COMMITTED=1
         finish
         echo "helper installed"
         """#
@@ -206,11 +223,12 @@ enum Helper {
         let tmp = NSTemporaryDirectory() + "wgtoggle-install-\(UUID().uuidString).sh"
         try text.write(toFile: tmp, atomically: true, encoding: .utf8)
         defer { try? FileManager.default.removeItem(atPath: tmp) }
-        let staged = "/var/root/wgtoggle-install.sh"
+        // Unique staging file per run; the whole job already holds the root lock (see detachedLauncher).
         let out = try runAsAdmin("""
-            install -o root -g wheel -m 700 \(shellQuote(tmp)) \(staged) && \
-            echo '\(hash)  \(staged)' | shasum -a 256 -c - >/dev/null && \
-            /bin/bash \(staged); rc=$?; rm -f \(staged); exit $rc
+            S=$(/usr/bin/mktemp /var/root/wgtoggle-install.XXXXXXXX) && \
+            install -o root -g wheel -m 700 \(shellQuote(tmp)) "$S" && \
+            echo "\(hash)  $S" | shasum -a 256 -c - >/dev/null && \
+            /bin/bash "$S"; rc=$?; rm -f "$S"; exit $rc
             """)
         // Configs now live in /etc/wireguard; remove the user-writable copies so they can't shadow them.
         for t in movingConfigs { try? FileManager.default.removeItem(atPath: t.path) }
@@ -218,20 +236,30 @@ enum Helper {
     }
 
     /// Bump when the helper script changes; older installs get an "update" prompt.
-    static let currentVersion = 6
+    static let currentVersion = 7
 
-    private static var versionCache: Int?
+    /// Set by the app: its main thread must never wait for sudo. The CLI leaves it off and simply waits.
+    nonisolated(unsafe) static var uiMode = false
+
+    nonisolated(unsafe) private static var versionCache: Int?
 
     /// Asked once per process (and again after install/uninstall); status reads depend on it.
+    /// On the main thread without a cached answer it returns 0 ("not known yet") and asks in the background.
     static var installedVersion: Int {
-        if let v = versionCache { return v }
+        lock.lock(); let cached = versionCache; lock.unlock()
+        if let v = cached { return v }
         guard isInstalled else { return 0 }
+        if uiMode && Thread.isMainThread { DispatchQueue.global().async { _ = fetchVersion() }; return 0 }
+        return fetchVersion()
+    }
+
+    private static func fetchVersion() -> Int {
         let v = Int((try? run(["version"]))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") ?? 1
-        versionCache = v
+        lock.lock(); versionCache = v; lock.unlock()
         return v
     }
 
-    static var needsUpdate: Bool { isInstalled && installedVersion < currentVersion }
+    static var needsUpdate: Bool { let v = installedVersion; return isInstalled && v > 0 && v < currentVersion }
 
     /// Config text without keys, for root-only configs (conflict checks). nil if unavailable.
     static func meta(_ name: String) -> String? {
@@ -240,34 +268,54 @@ enum Helper {
     }
 
     private static let lock = NSLock()
-    private static var cache: (Date, [String: Status]?)?
-    private static var lastFailed = false
+    nonisolated(unsafe) private static var cache: (Date, [String: Status]?)?
+    nonisolated(unsafe) private static var lastFailed = false
+    nonisolated(unsafe) private static var generation = 0        // bumped by invalidateCache(): older in-flight results are dropped
+    nonisolated(unsafe) private static var refreshing = false    // at most one helper status call at a time
 
     /// `status()` is a sudo call; `isUp` is asked many times per second while the menu is open.
-    /// nil = the helper couldn't be asked (not the same as "no tunnels up").
+    /// nil = the helper couldn't be asked (yet), which callers show as "unknown", never as "down".
+    /// The main thread never waits for sudo: it gets the cached answer (or nil) and a background refresh starts.
     static func cachedStatus() -> [String: Status]? {
         lock.lock()
-        let cached = cache
+        let cached = cache, fresh = cached.map { Date().timeIntervalSince($0.0) < 2 } ?? false
         lock.unlock()
-        if let (at, s) = cached, Date().timeIntervalSince(at) < 2 { return s }
-        // The main thread never waits for sudo once there's any answer: the stats queue refreshes every 5 s.
-        if Thread.isMainThread, let (_, s) = cached { return s }
+        if fresh { return cached?.1 }
+        if uiMode && Thread.isMainThread {
+            DispatchQueue.global().async { _ = refresh() }
+            return cached?.1
+        }
+        return refresh() ?? cached?.1
+    }
+
+    /// One fetch at a time; a result is only stored if no invalidation happened while it ran.
+    @discardableResult
+    private static func refresh() -> [String: Status]? {
+        lock.lock()
+        if refreshing { let c = cache?.1; lock.unlock(); return c }
+        refreshing = true
+        let gen = generation
+        lock.unlock()
         let s = status()   // outside the lock: a slow helper call must not block other readers
-        lock.lock(); cache = (Date(), s); lock.unlock()
+        lock.lock()
+        if gen == generation { cache = (Date(), s) }
+        refreshing = false
+        lock.unlock()
         return s
     }
 
     /// Call after connecting/disconnecting so the next check reads fresh state.
-    static func invalidateCache() { lock.lock(); cache = nil; versionCache = nil; lock.unlock() }
+    static func invalidateCache() { lock.lock(); cache = nil; versionCache = nil; generation += 1; lock.unlock() }
+
 
     static func uninstall() throws {
         try runAsAdmin("rm -f \(sudoers) && rm -rf \(shellQuote(dir))")
     }
 
     /// Runs the helper via `sudo -n` (never prompts). Returns combined output; throws on failure.
-    @discardableResult
     /// Never blocks forever: a stuck `wg show` (e.g. a hung wireguard-go) would otherwise freeze the caller.
     /// up/down may legitimately take a while; status/meta/version should answer in well under a second.
+    @discardableResult
     static func run(_ args: [String], timeout: TimeInterval? = nil, command: [String]? = nil) throws -> String {
         let limit = timeout ?? (["up", "down", "dns-repair"].contains(args.first ?? "") ? 60 : 5)
         let p = Process()
@@ -280,15 +328,19 @@ enum Helper {
         let exited = DispatchSemaphore(value: 0)
         p.terminationHandler = { _ in exited.signal() }
         try p.run()
-        var data = Data()
+        // The reader thread hands its result over through a lock; we only read it after it signalled.
+        let box = LockedBox<Data>()
         let readDone = DispatchSemaphore(value: 0)
-        DispatchQueue.global().async { data = pipe.fileHandleForReading.readDataToEndOfFile(); readDone.signal() }
+        DispatchQueue.global().async { box.set(pipe.fileHandleForReading.readDataToEndOfFile()); readDone.signal() }
         if exited.wait(timeout: .now() + limit) == .timedOut {
             p.terminate()
             if exited.wait(timeout: .now() + 2) == .timedOut { kill(p.processIdentifier, SIGKILL) }
             throw NSError(domain: "WGToggle", code: -2, userInfo: [NSLocalizedDescriptionKey: "helper \(args.first ?? "") timed out after \(Int(limit))s"])
         }
-        _ = readDone.wait(timeout: .now() + 2)
+        guard readDone.wait(timeout: .now() + 2) == .success, let data = box.get() else {
+            // Process exited but its output never finished: don't accept partial output as an answer.
+            throw NSError(domain: "WGToggle", code: -3, userInfo: [NSLocalizedDescriptionKey: "helper \(args.first ?? "") output incomplete"])
+        }
         let out = String(decoding: data, as: UTF8.self)
         guard p.terminationStatus == 0 else {
             throw NSError(domain: "WGToggle", code: Int(p.terminationStatus),
@@ -300,18 +352,27 @@ enum Helper {
     struct Peer { let key: String; let handshake: Date?; let rx: UInt64; let tx: UInt64 }
     struct Status { let iface: String; let handshake: Date?; let rx: UInt64; let tx: UInt64; var peers: [Peer] = [] }
 
+
+    /// Sets the failure flag; true when it changed (so each transition is logged once).
+    private static func flagFailure(_ failed: Bool) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard lastFailed != failed else { return false }
+        lastFailed = failed
+        return true
+    }
+
     static func status() -> [String: Status]? {
         guard isInstalled else { return nil }
         do {
             let out = try run(["status"])
-            guard let parsed = parseStatus(out, strict: installedVersion >= 6) else {
-                if !lastFailed { Log.error("helper status incomplete, tunnel state unknown", detail: out); lastFailed = true }
+            guard let parsed = parseStatus(out, strict: installedVersion >= 6) else {   // v6+ has the end marker
+                if flagFailure(true) { Log.error("helper status incomplete, tunnel state unknown", detail: out) }
                 return nil
             }
-            if lastFailed { Log.info("helper status works again"); lastFailed = false }
+            if flagFailure(false) { Log.info("helper status works again") }
             return parsed
         } catch {
-            if !lastFailed { Log.error("helper status failed, tunnel state unknown", detail: error.localizedDescription); lastFailed = true }
+            if flagFailure(true) { Log.error("helper status failed, tunnel state unknown", detail: error.localizedDescription) }
             return nil
         }
     }
@@ -327,10 +388,10 @@ enum Helper {
             let f = line.split(separator: " ").map(String.init)
             if strict && sawEnd { return nil }   // nothing may follow the end marker
             if f.count == 5, let hs = TimeInterval(f[2]), let rx = UInt64(f[3]), let tx = UInt64(f[4]) {
-                if strict && r[f[0]] != nil { return nil }   // duplicate tunnel
+                if strict && (r[f[0]] != nil || !isValidName(f[0]) || f[1].range(of: "^utun[0-9]+$", options: .regularExpression) == nil || hs < 0) { return nil }
                 r[f[0]] = Status(iface: f[1], handshake: date(hs), rx: rx, tx: tx, peers: r[f[0]]?.peers ?? [])
             } else if f.count == 6, f[0] == "peer", let hs = TimeInterval(f[3]), let rx = UInt64(f[4]), let tx = UInt64(f[5]) {
-                if strict && r[f[1]] == nil { return nil }   // peer of an unlisted tunnel
+                if strict && (r[f[1]] == nil || hs < 0 || r[f[1]]!.peers.contains { $0.key == f[2] }) { return nil }   // orphan or duplicate peer
                 r[f[1]]?.peers.append(Peer(key: f[2], handshake: date(hs), rx: rx, tx: tx))
             } else if f.count == 2, f[0] == "end", let n = Int(f[1]) {
                 if strict && n != r.count { return nil }      // records missing or extra
@@ -341,4 +402,12 @@ enum Helper {
         }
         return strict && !sawEnd ? nil : r
     }
+}
+
+/// Value handed from one thread to another under a lock.
+final class LockedBox<T>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: T?
+    func set(_ v: T) { lock.lock(); value = v; lock.unlock() }
+    func get() -> T? { lock.lock(); defer { lock.unlock() }; return value }
 }

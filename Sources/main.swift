@@ -9,8 +9,10 @@ if CommandLine.arguments.contains("--diagnose") {
     exit(CLI.run(["diagnose"]))
 }
 
-let app = NSApplication.shared
-let delegate = AppDelegate()
-app.delegate = delegate
-app.setActivationPolicy(.accessory)
-app.run()
+MainActor.assumeIsolated {   // top-level code runs on the main thread
+    let app = NSApplication.shared
+    let delegate = AppDelegate()
+    app.delegate = delegate
+    app.setActivationPolicy(.accessory)
+    app.run()
+}

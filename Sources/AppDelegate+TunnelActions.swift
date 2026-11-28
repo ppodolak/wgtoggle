@@ -95,19 +95,20 @@ extension AppDelegate {
         CATransaction.flush()   // commit the pulse animation before main shows the password dialog
         // Always off the main thread: runAsAdmin shows its dialog on main and waits for the root job here,
         // so the menu and icon stay responsive while an install or wg-quick runs.
+        nonisolated(unsafe) let work = work   // runs once, on adminQueue only
         adminQueue.async {
-            var failure: String?
-            var cancelled = false
+            let failure: String?, cancelled: Bool
             do {
                 let out = try work()
                 Log.info("\(what) ok", detail: out.trimmingCharacters(in: .whitespacesAndNewlines))
+                (failure, cancelled) = (nil, false)
             } catch let e as NSError where e.code == -128 {
-                cancelled = true
+                (failure, cancelled) = (nil, true)
             } catch {
-                failure = error.localizedDescription
+                (failure, cancelled) = (error.localizedDescription, false)
             }
             Helper.invalidateCache()
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { MainActor.assumeIsolated {
                 OpLock.release(lock)
                 self.busy = nil
                 self.stopBlink()
@@ -117,24 +118,24 @@ extension AppDelegate {
                     Notify.error("\(what) failed", failure)
                 }
                 self.refreshIcon()
-            }
+            } }
         }
     }
 
     /// Pulses the menu bar icon (and steps the shield fill) while a tunnel is connecting/disconnecting.
     func startBlink() {
         statusItem.button?.toolTip = busy
-        var phase = 0
+        blinkPhase = 0
         let frames = ["shield", "shield.lefthalf.filled", "checkmark.shield", "shield.lefthalf.filled"]
         blinkTimer?.invalidate()
-        blinkTimer = Timer.scheduledTimer(withTimeInterval: 0.35, repeats: true) { [weak self] _ in
+        blinkTimer = Timer.scheduledTimer(withTimeInterval: 0.35, repeats: true) { [weak self] _ in MainActor.assumeIsolated {
             guard let self, let button = self.statusItem.button else { return }
-            phase += 1
-            let img = NSImage(systemSymbolName: frames[phase % frames.count], accessibilityDescription: "Connecting")?
+            self.blinkPhase += 1
+            let img = NSImage(systemSymbolName: frames[self.blinkPhase % frames.count], accessibilityDescription: "Connecting")?
                 .withSymbolConfiguration(.init(pointSize: 14, weight: .medium))
             img?.isTemplate = true
             button.image = img
-        }
+        } }
         RunLoop.main.add(blinkTimer!, forMode: .common)   // keep animating while the menu is open
         if let button = statusItem.button {
             button.wantsLayer = true
@@ -158,10 +159,11 @@ extension AppDelegate {
     func sampleStats() {
         if demoMode { stats = Demo.stats.filter { Demo.up.contains($0.key) }; refreshIcon(); return }
         let tunnels = listTunnels()
-        statsQueue.async { [weak self] in
-            guard let self else { return }
-            let r = self.health.sample(tunnels: tunnels)
-            DispatchQueue.main.async {
+        let health = self.health   // only ever used on statsQueue
+        // The app delegate lives as long as the app, so strong captures are fine (and Sendable: it's main-actor).
+        statsQueue.async {
+            let r = health.sample(tunnels: tunnels)
+            DispatchQueue.main.async { MainActor.assumeIsolated {
                 self.stats = r.stats
                 for name in r.newlyStuck { self.handleStuck(name) }
                 for (name, peer) in r.newlyStalePeers {
@@ -169,7 +171,7 @@ extension AppDelegate {
                     Notify.error("\(name): a peer isn't responding", "Peer \(peer) gets traffic but hasn't completed a handshake. Other peers of this tunnel still work.")
                 }
                 self.refreshIcon()
-            }
+            } }
         }
     }
 
@@ -180,8 +182,8 @@ extension AppDelegate {
         if suspectSharedConfig(episodes: stuckEpisodes[name] ?? []) {
             if sharedConfigSuspects.insert(name).inserted {
                 Log.warn("\(name): stuck again shortly after working, likely the same config on another device; auto-restart paused")
-                Notify.error("\(name) is probably used on another device",
-                             "It keeps losing replies after working. One WireGuard config (one key) can only be connected on one device at a time. Create a separate config for each device in your VPN portal. Auto-restart is paused for this tunnel.")
+                Notify.error("\(name) may be in use on another device",
+                             "It keeps losing replies after working. Most likely the same config (same key) is connected on another device; an unstable network or a restarting server can look the same. Use a separate config per device. Auto-restart is paused for this tunnel (menu → Resume Auto-restart).")
             }
             return
         }
@@ -208,6 +210,12 @@ extension AppDelegate {
         }
     }
 
+    @objc func resumeAutoRestart(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String else { return }
+        sharedConfigSuspects.remove(name); stuckEpisodes[name] = nil
+        Log.info("\(name): auto-restart resumed by the user")
+    }
+
     func restart(_ t: Tunnel) {
         let viaHelper = Helper.isInstalled && t.path.hasPrefix(Helper.configDir + "/")
         runTask(what: "restart \(t.name)", status: "Restarting \(t.name)…", needsPrompt: !viaHelper) {
@@ -221,16 +229,18 @@ extension AppDelegate {
 
     /// Auto-connect at launch; after wake and network changes too when passwordless (no surprise prompts).
     func setupAutoConnect() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.autoConnect(reason: "launch") }
-        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
-            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { self?.autoConnect(reason: "wake") }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in MainActor.assumeIsolated { self?.autoConnect(reason: "launch") } }
+        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { _ in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { MainActor.assumeIsolated { self.autoConnect(reason: "wake") } }
         }
         let monitor = NWPathMonitor()
-        var wasSatisfied = true
-        monitor.pathUpdateHandler = { [weak self] path in
+        let wasSatisfied = LockedBox<Bool>()
+        monitor.pathUpdateHandler = { path in
             let ok = path.status == .satisfied
-            if ok && !wasSatisfied { DispatchQueue.main.asyncAfter(deadline: .now() + 3) { self?.autoConnect(reason: "network change") } }
-            wasSatisfied = ok
+            if ok && wasSatisfied.get() == false {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3) { MainActor.assumeIsolated { self.autoConnect(reason: "network change") } }
+            }
+            wasSatisfied.set(ok)
         }
         monitor.start(queue: DispatchQueue(label: "wgtoggle.path"))
         pathMonitor = monitor

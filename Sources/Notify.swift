@@ -2,7 +2,7 @@ import AppKit
 import UserNotifications
 
 /// macOS notifications for tunnel up/down and errors. Clicking an error opens the Log Explorer.
-final class Notify: NSObject, UNUserNotificationCenterDelegate {
+final class Notify: NSObject, UNUserNotificationCenterDelegate, @unchecked Sendable {   // stateless
     static let shared = Notify()
     static let enabledKey = "notificationsEnabled"
 
