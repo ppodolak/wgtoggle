@@ -2,10 +2,14 @@
 
 ## Unreleased
 
-## 1.14.1 - 2026-11-28
+## 1.14.2 - 2026-11-28
 
 ### Fixed
-- A spurious "connected" notification at launch in passwordless mode: the brief "unknown" state before the helper's first answer counted as "down".
+- A spurious "connected" notification at launch in passwordless mode: the brief "unknown" state before the helper's first answer counted as "down" (and could also trigger an unneeded auto-reconnect). Unknown is now never treated as a change.
+
+## 1.14.1 - 2026-11-28
+
+No code change: the fix described for this version was missing from the build. It shipped in 1.14.2.
 
 ## 1.14.0 - 2026-11-28
 

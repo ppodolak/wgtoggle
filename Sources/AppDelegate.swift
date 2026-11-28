@@ -103,9 +103,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let up = tunnels.filter { $0.isUp }
 
         // Log state changes, including ones made outside the app (e.g. wg-quick in a terminal).
-        let state = Dictionary(uniqueKeysWithValues: tunnels.map { ($0.name, $0.isUp) })
+        // "Unknown" (e.g. the first second after launch, before the helper answered) is not a change:
+        // keep the last known value instead of reporting a disconnect/connect (or auto-reconnecting).
+        var state = lastState.filter { s in tunnels.contains { $0.name == s.key } }
+        for t in tunnels {
+            switch t.state { case .up: state[t.name] = true; case .down: state[t.name] = false; case .unknown: break }
+        }
         if !lastState.isEmpty {
-            for (name, isUp) in state where lastState[name] != isUp {
+            for (name, isUp) in state where lastState[name] != nil && lastState[name] != isUp {
                 Log.info("\(name) is now \(isUp ? "UP" : "DOWN")")
                 isUp ? Notify.connected(name) : Notify.disconnected(name)
                 // Dropped on its own (wireguard-go died, sleep, network change): bring it back.
