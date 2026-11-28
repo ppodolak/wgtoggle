@@ -17,6 +17,8 @@ enum CLI {
           conflicts             overlapping routes, default routes, shared DNS domains
           dns                   active split-DNS resolvers (/etc/resolver)
           dns repair            clean up resolvers left by crashed tunnels or a reboot
+          check NAME [TARGET]   show or set a connectivity check (host:port or http(s) URL); --clear removes it
+          health                run every configured check now (exit 1 if one fails, 4 if a state is unknown)
           version               app and wireguard-tools versions
           diagnose              status plus app settings (no keys are printed)
 
@@ -103,6 +105,29 @@ enum CLI {
                 print("\(f.padding(toLength: 24, withPad: " ", startingAt: 0)) \(ns.joined(separator: ", "))")
             }
             return 0
+        case "check":
+            guard let name = rest.first, listTunnels().contains(where: { $0.name == name }) else {
+                fputs("wgtoggle check: name a tunnel\n", stderr); return 2
+            }
+            if rest.count == 1 { print(ConnectivityCheck.targets[name] ?? "no check for \(name)"); return 0 }
+            if rest[1] == "--clear" { ConnectivityCheck.targets[name] = nil; print("check for \(name) removed"); return 0 }
+            guard let target = ConnectivityCheck.validate(rest[1]) else { fputs("wgtoggle check: use host:port or an http(s) URL\n", stderr); return 2 }
+            ConnectivityCheck.targets[name] = target
+            print("\(name): checking \(target)")
+            return 0
+        case "health":
+            let snap = listTunnels().map { ($0, $0.state) }
+            var rc: Int32 = snap.contains { $0.1 == .unknown } ? 4 : 0
+            let targets = ConnectivityCheck.targets
+            if targets.isEmpty { print("no connectivity checks configured (wgtoggle check NAME host:port)") }
+            for (t, state) in snap.sorted(by: { $0.0.name < $1.0.name }) {
+                guard let target = targets[t.name] else { continue }
+                guard state == .up else { print("\(label(state))  \(t.name.padding(toLength: 16, withPad: " ", startingAt: 0)) \(target)  (not up)"); continue }
+                let r = ConnectivityCheck.run(target)
+                print("\(r.ok ? "ok  " : "FAIL")  \(t.name.padding(toLength: 16, withPad: " ", startingAt: 0)) \(target)  \(r.detail)")
+                if !r.ok && rc == 0 { rc = 1 }
+            }
+            return rc
         case "version":
             print("WGToggle \(Updates.current)")
             if let wg = findBinary("wg") {

@@ -63,6 +63,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
         if CommandLine.arguments.contains("--show-logs") { MainActor.assumeIsolated { LogExplorer.show() } }
+        if CommandLine.arguments.contains("--show-inspector") { NetworkInspector.show() }
         if CommandLine.arguments.contains("--show-about") { showAbout() }
         // README screenshots: open the menu bar menu programmatically.
         if CommandLine.arguments.contains("--show-menu") {

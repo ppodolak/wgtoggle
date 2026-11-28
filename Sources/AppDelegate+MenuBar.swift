@@ -79,6 +79,7 @@ extension AppDelegate {
             menu.addItem(rm)
         }
         menu.addItem(item("Open Config Directory", #selector(openFolder)))
+        menu.addItem(item("Network Inspector…", #selector(showInspector), key: "i"))
         menu.addItem(item("Log Explorer…", #selector(showLog), key: "l"))
         menu.addItem(.separator())
         if !tunnels.isEmpty {
@@ -86,6 +87,15 @@ extension AppDelegate {
                 let mi = item(t.name, #selector(toggleAutoConnect(_:)))
                 mi.representedObject = t.name
                 mi.state = AutoConnect.tunnels.contains(t.name) ? .on : .off
+                return mi
+            }))
+        }
+        if !tunnels.isEmpty {
+            menu.addItem(submenu("Connectivity Check", tunnels.map { t in
+                let target = ConnectivityCheck.targets[t.name]
+                let mi = item(target.map { "\(t.name): \($0)…" } ?? "\(t.name)…", #selector(editConnectivityCheck(_:)))
+                mi.representedObject = t.name
+                mi.state = target == nil ? .off : .on
                 return mi
             }))
         }
@@ -165,13 +175,15 @@ extension AppDelegate {
         if sharedConfigSuspects.contains(t.name) { parts.append("⚠︎ may be in use on another device, auto-restart paused") }
         else if st.stuck { parts.append("⚠︎ stuck: no replies") }
         if !st.stalePeers.isEmpty { parts.append("⚠︎ peer \(st.stalePeers.joined(separator: ", ")) not responding") }
+        if let c = st.check { parts.append(c.ok ? "✓ check ok" : "⚠︎ check failed") }
         if let h = st.handshake { parts.append("handshake \(formatAgo(h))") }
         if st.iface != nil { parts.append("↓\(formatBytes(st.rx)) ↑\(formatBytes(st.tx))") }
         if let a = st.address { parts.append(a) }
         guard !parts.isEmpty else { return s }
         s.append(NSAttributedString(string: "\n" + parts.joined(separator: " · "), attributes: [
             .font: NSFont.menuFont(ofSize: NSFont.smallSystemFontSize),
-            .foregroundColor: st.stuck || !st.stalePeers.isEmpty || sharedConfigSuspects.contains(t.name) ? NSColor.systemOrange : NSColor.secondaryLabelColor,
+            .foregroundColor: st.stuck || !st.stalePeers.isEmpty || sharedConfigSuspects.contains(t.name) || st.check?.ok == false
+                ? NSColor.systemOrange : NSColor.secondaryLabelColor,
         ]))
         return s
     }

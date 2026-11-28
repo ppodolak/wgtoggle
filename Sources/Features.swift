@@ -205,3 +205,71 @@ enum QRImport {
         return det.features(in: ci).compactMap { ($0 as? CIQRCodeFeature)?.messageString }.first
     }
 }
+
+// MARK: - Connectivity checks
+//
+// Optional per tunnel: something inside the VPN that should answer, e.g. "10.0.0.1:22" (TCP connect) or
+// "https://grafana.corp/healthz" (any HTTP response). A tunnel can look fine (fresh handshake, traffic)
+// while what you actually need behind it is unreachable; this shows that directly.
+
+enum ConnectivityCheck {
+    static let key = "connectivityChecks"
+    /// tunnel name → target
+    static var targets: [String: String] {
+        get { (UserDefaults.standard.dictionary(forKey: key) as? [String: String]) ?? [:] }
+        set { UserDefaults.standard.set(newValue, forKey: key) }
+    }
+
+    /// "host:port", "[v6]:port" or an http(s) URL. nil = not a valid target.
+    static func validate(_ t: String) -> String? {
+        let s = t.trimmingCharacters(in: .whitespaces)
+        if let u = URL(string: s), ["http", "https"].contains(u.scheme?.lowercased() ?? ""), u.host != nil { return s }
+        return parseHostPort(s) != nil ? s : nil
+    }
+
+    static func parseHostPort(_ s: String) -> (host: String, port: UInt16)? {
+        guard let colon = s.lastIndex(of: ":"), let port = UInt16(s[s.index(after: colon)...]), port > 0 else { return nil }
+        var host = String(s[..<colon])
+        if host.hasPrefix("[") && host.hasSuffix("]") { host = String(host.dropFirst().dropLast()) }
+        guard !host.isEmpty, host.range(of: #"^[A-Za-z0-9.:-]+$"#, options: .regularExpression) != nil else { return nil }
+        return (host, port)
+    }
+
+    /// Runs one check (blocking, bounded by `timeout`). Call off the main thread.
+    static func run(_ target: String, timeout: TimeInterval = 4) -> (ok: Bool, detail: String) {
+        let start = Date()
+        let ms = { "\(Int(Date().timeIntervalSince(start) * 1000)) ms" }
+        if let url = URL(string: target), ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
+            var req = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: timeout)
+            req.httpMethod = "HEAD"
+            let result = LockedBox<(Bool, String)>()
+            let done = DispatchSemaphore(value: 0)
+            URLSession.shared.dataTask(with: req) { _, resp, err in
+                if let http = resp as? HTTPURLResponse { result.set((true, "HTTP \(http.statusCode)")) }
+                else { result.set((false, err?.localizedDescription ?? "no response")) }
+                done.signal()
+            }.resume()
+            guard done.wait(timeout: .now() + timeout + 1) == .success, let (ok, d) = result.get() else { return (false, "timed out") }
+            return (ok, ok ? "\(d), \(ms())" : d)
+        }
+        guard let (host, port) = parseHostPort(target) else { return (false, "invalid target") }
+        // Plain non-blocking TCP connect: works for IPv4/IPv6 literals and names.
+        var hints = addrinfo(ai_flags: 0, ai_family: AF_UNSPEC, ai_socktype: SOCK_STREAM, ai_protocol: IPPROTO_TCP,
+                             ai_addrlen: 0, ai_canonname: nil, ai_addr: nil, ai_next: nil)
+        var res: UnsafeMutablePointer<addrinfo>?
+        guard getaddrinfo(host, String(port), &hints, &res) == 0, let ai = res else { return (false, "can't resolve \(host)") }
+        defer { freeaddrinfo(res) }
+        let fd = socket(ai.pointee.ai_family, ai.pointee.ai_socktype, ai.pointee.ai_protocol)
+        guard fd >= 0 else { return (false, "socket error") }
+        defer { close(fd) }
+        _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
+        if connect(fd, ai.pointee.ai_addr, ai.pointee.ai_addrlen) == 0 { return (true, "connected, \(ms())") }
+        guard errno == EINPROGRESS else { return (false, String(cString: strerror(errno))) }
+        var pfd = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+        guard poll(&pfd, 1, Int32(timeout * 1000)) == 1 else { return (false, "timed out") }
+        var err: Int32 = 0
+        var len = socklen_t(MemoryLayout<Int32>.size)
+        getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len)
+        return err == 0 ? (true, "connected, \(ms())") : (false, String(cString: strerror(err)))
+    }
+}

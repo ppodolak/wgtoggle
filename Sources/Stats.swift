@@ -17,6 +17,8 @@ struct TunnelStats {
     /// Peers (short public key) that get traffic but haven't completed a handshake recently.
     /// Only filled for tunnels with several peers, in passwordless mode.
     var stalePeers: [String] = []
+    /// Last connectivity check result for this tunnel (nil = no check configured or not run yet).
+    var check: (ok: Bool, detail: String)?
 }
 
 /// A peer is stale when something was sent to it during the window but its handshake is old or missing.
@@ -106,9 +108,13 @@ final class HealthMonitor: @unchecked Sendable {
     private var notifiedStuck = Set<String>()
     private var peerSamples: [String: [(Date, UInt64)]] = [:]
     private var notifiedPeers = Set<String>()
+    private var checks: [String: (at: Date, ok: Bool, detail: String)] = [:]
+    /// Tunnels whose connectivity check just started failing (reported once per failure).
+    private(set) var newlyFailedChecks: [String] = []
 
     /// Called every few seconds off the main thread.
     func sample(tunnels: [Tunnel]) -> (stats: [String: TunnelStats], newlyStuck: [String], newlyStalePeers: [(String, String)]) {
+        newlyFailedChecks = []
         let table = interfaceTable()
         let helper = Helper.cachedStatus() ?? [:]
         let now = Date()
@@ -165,11 +171,21 @@ final class HealthMonitor: @unchecked Sendable {
                     }
                 }
             }
+            // Configured connectivity check, every 30 s while the tunnel is up.
+            if let target = ConnectivityCheck.targets[t.name] {
+                if checks[t.name].map({ now.timeIntervalSince($0.at) >= 30 }) ?? true {
+                    let r = ConnectivityCheck.run(target)
+                    if !r.ok && checks[t.name]?.ok != false { newlyFailedChecks.append(t.name) }
+                    checks[t.name] = (now, r.ok, r.detail)
+                }
+                if let c = checks[t.name] { s.check = (c.ok, c.detail) }
+            }
             if s.stuck && !notifiedStuck.contains(t.name) { newlyStuck.append(t.name); notifiedStuck.insert(t.name) }
             if !s.stuck { notifiedStuck.remove(t.name) }
             newStats[t.name] = s
         }
         for name in samples.keys where newStats[name] == nil { samples[name] = nil; notifiedStuck.remove(name) }
+        checks = checks.filter { newStats[$0.key] != nil }
         // Drop peer history for tunnels that are down and peers that left the config.
         let live = Set(newStats.keys.flatMap { n in (helper[n]?.peers ?? []).map { "\(n)/\($0.key)" } })
         peerSamples = peerSamples.filter { live.contains($0.key) }

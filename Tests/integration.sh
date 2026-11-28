@@ -33,7 +33,7 @@ netstat -rn -f inet | grep -q "10.99.1" || fail "route not installed"
 [[ "$(state ci)" == down ]] || fail "expected down after wgtoggle down"
 
 echo "== passwordless helper: real install"
-"$APP/Contents/MacOS/WGToggle" --diagnose --print-installer | sed -n '/^#!\/bin\/bash/,$p' > /tmp/wgt-install.sh
+"$APP/Contents/MacOS/WGToggle" --diagnose --print-installer > /tmp/wgt-install.sh
 sudo /bin/bash /tmp/wgt-install.sh
 [[ -f /etc/wireguard/ci.conf && "$(stat -f %u /etc/wireguard/ci.conf)" == 0 ]] || fail "config not migrated to root-owned /etc/wireguard"
 rm -f "$CONF_DIR/ci.conf"   # the app does this after a successful install

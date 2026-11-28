@@ -163,9 +163,15 @@ extension AppDelegate {
         // The app delegate lives as long as the app, so strong captures are fine (and Sendable: it's main-actor).
         statsQueue.async {
             let r = health.sample(tunnels: tunnels)
+            let failedChecks = health.newlyFailedChecks
             DispatchQueue.main.async { MainActor.assumeIsolated {
                 self.stats = r.stats
                 for name in r.newlyStuck { self.handleStuck(name) }
+                for name in failedChecks {
+                    let detail = r.stats[name]?.check?.detail ?? ""
+                    Log.warn("\(name): connectivity check failed (\(ConnectivityCheck.targets[name] ?? "")): \(detail)")
+                    Notify.error("\(name): connectivity check failed", "\(ConnectivityCheck.targets[name] ?? "") isn't reachable through the tunnel: \(detail)")
+                }
                 for (name, peer) in r.newlyStalePeers {
                     Log.warn("\(name): peer \(peer) gets traffic but no handshake")
                     Notify.error("\(name): a peer isn't responding", "Peer \(peer) gets traffic but hasn't completed a handshake. Other peers of this tunnel still work.")
@@ -302,5 +308,27 @@ extension AppDelegate {
         guard let n = sender.representedObject as? String else { return }
         Profiles.all[n] = nil
         Log.info("profile deleted: \(n)")
+    }
+}
+
+extension AppDelegate {
+    @objc func editConnectivityCheck(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String else { return }
+        let a = NSAlert()
+        a.messageText = "Connectivity check for \(name)"
+        a.informativeText = "Something inside this VPN that should answer, checked every 30 seconds while the tunnel is up:\n• host:port, e.g. 10.0.0.1:22 (TCP connect)\n• a URL, e.g. https://grafana.corp/healthz (any HTTP response)\n\nLeave empty to turn the check off."
+        let f = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
+        f.stringValue = ConnectivityCheck.targets[name] ?? ""
+        f.placeholderString = "10.0.0.1:22"
+        a.accessoryView = f
+        a.addButton(withTitle: "Save"); a.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        a.window.initialFirstResponder = f
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+        let v = f.stringValue.trimmingCharacters(in: .whitespaces)
+        if v.isEmpty { ConnectivityCheck.targets[name] = nil; Log.info("\(name): connectivity check off"); return }
+        guard let ok = ConnectivityCheck.validate(v) else { alert("Not a valid target", "Use host:port or an http(s) URL."); return }
+        ConnectivityCheck.targets[name] = ok
+        Log.info("\(name): connectivity check set to \(ok)")
     }
 }

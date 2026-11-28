@@ -218,6 +218,23 @@ check(!suspectSharedConfig(episodes: [n0], now: n0), "one stuck episode: just st
 check(suspectSharedConfig(episodes: [n0.addingTimeInterval(-300), n0], now: n0), "stuck again within 15 min: shared config suspected")
 check(!suspectSharedConfig(episodes: [n0.addingTimeInterval(-3600), n0], now: n0), "episodes far apart aren't a pattern")
 
+print("connectivity checks")
+check(ConnectivityCheck.validate("10.0.0.1:22") != nil && ConnectivityCheck.validate("[fd00::1]:443") != nil && ConnectivityCheck.validate("https://x.corp/health") != nil, "valid targets accepted")
+check(ConnectivityCheck.validate("10.0.0.1") == nil && ConnectivityCheck.validate("x;rm:22") == nil && ConnectivityCheck.validate("ftp://x") == nil && ConnectivityCheck.validate("h:0") == nil, "invalid targets rejected")
+do {   // a real listener on 127.0.0.1 and a closed port
+    let fd = socket(AF_INET, SOCK_STREAM, 0)
+    var addr = sockaddr_in(); addr.sin_family = sa_family_t(AF_INET); addr.sin_addr.s_addr = inet_addr("127.0.0.1"); addr.sin_port = 0
+    _ = withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) } }
+    listen(fd, 1)
+    var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+    _ = withUnsafeMutablePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &len) } }
+    let port = UInt16(bigEndian: addr.sin_port)
+    check(ConnectivityCheck.run("127.0.0.1:\(port)").ok, "TCP check succeeds against a listener")
+    close(fd)
+    let closed = ConnectivityCheck.run("127.0.0.1:\(port)", timeout: 2)
+    check(!closed.ok, "TCP check fails on a closed port (\(closed.detail))")
+}
+
 print("restart backoff")
 let now = Date()
 check(restartDelay(previous: [], now: now) == 10, "first restart after 10s")

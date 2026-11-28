@@ -10,6 +10,8 @@ _wgtoggle() {
     'routes:networks each tunnel routes'
     'conflicts:overlapping routes and shared DNS domains'
     'dns:active split-DNS resolvers'
+    'check:show or set a connectivity check'
+    'health:run connectivity checks now'
     'version:app, wireguard-tools and helper versions'
     'diagnose:status plus settings'
     'help:show usage'
@@ -19,7 +21,7 @@ _wgtoggle() {
     return
   fi
   case $words[2] in
-    up|down) compadd -- ${(f)"$(wgtoggle list --names 2>/dev/null)"} ;;
+    up|down|check) compadd -- ${(f)"$(wgtoggle list --names 2>/dev/null)"} ;;
     profile) (( CURRENT == 3 )) && compadd -- ${(f)"$(wgtoggle list --profiles 2>/dev/null)"} ;;
     status|routes) compadd -- --json ;;
   esac

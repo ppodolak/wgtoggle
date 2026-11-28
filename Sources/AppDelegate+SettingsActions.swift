@@ -5,6 +5,8 @@ import ServiceManagement
 
 /// Settings toggles, passwordless mode, updates, About and links.
 extension AppDelegate {
+    @objc func showInspector() { NetworkInspector.show() }
+
     @objc func showLog() {
         Log.queue.sync {}  // flush
         MainActor.assumeIsolated { LogExplorer.show() }  // menu actions run on main

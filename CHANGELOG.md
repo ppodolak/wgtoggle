@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+## 1.14.0 - 2026-11-28
+
+### Added
+- Connectivity checks per tunnel (TCP `host:port` or an HTTP(S) URL), every 30 s while up; shown in the menu and notified on failure. `wgtoggle check` and `wgtoggle health`.
+- Network Inspector window (⌘I): routes, DNS domains, checks, conflicts and active resolvers.
+- **Resume Auto-restart** for a tunnel that's suspected of being used on another device.
+- Release DMGs carry a GitHub build provenance attestation.
+- Threat model in SECURITY.md.
+- CI: Thread Sanitizer run, Swift 6 strict-concurrency gate (zero warnings), and a real integration test (real wg-quick tunnel, real helper install, helper-driven up/down).
+
+### Changed
+- Every privileged job (admin actions, helper up/down, DNS repair, installs) takes one system-wide lock, so jobs from the app, the CLI or another instance never overlap. A timed-out job blocks new admin work until it finishes.
+- Privileged job output: private (`0600`) file in a root-owned unlistable directory, keys redacted before it's written, removed a minute after the job.
+- Installer backups are crash-safe (copied, verified, published by rename) and a failed rollback keeps the journal for the next attempt. Staging files are unique per run.
+- The app's main thread never waits for the helper: first status reads return "unknown" briefly while a background refresh runs; results from before a change can't overwrite newer ones.
+- Stricter helper status parsing: duplicate peers, invalid interface names and negative timestamps are rejected.
+- Passwordless helper v7.
+- "May be in use on another device" is worded as a suspicion (an unstable network can look the same).
+
+### Fixed
+- Output of a helper call could be read while still being written (data race); incomplete output is now an error.
+
 ## 1.13.1 - 2026-11-27
 
 ### Changed

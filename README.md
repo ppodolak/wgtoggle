@@ -66,7 +66,9 @@ brew install --cask ppodolak/tap/wgtoggle
 - Edit tunnels and import a config from a QR code (clipboard screenshot or image file).
 - Global shortcut ⌃⌥⌘T toggles all tunnels.
 - Update check against GitHub Releases.
-- Command line tool: `wgtoggle status --json`, `up`, `down`, `profile` (see [Command line](#command-line)).
+- Command line tool: `wgtoggle status --json`, `up`, `down`, `profile`, `health` (see [Command line](#command-line)).
+- Connectivity checks: per tunnel, something inside the VPN that should answer (`10.0.0.1:22` or an `https://` URL). Checked every 30 s; shown in the menu and notified when it fails.
+- Network Inspector (⌘I): every tunnel's routes, DNS domains and connectivity check, conflicts between tunnels, and the active split-DNS resolvers.
 - Launch at Login: one click, using the system's `SMAppService`.
 - Show in Dock: optional Dock icon. Click it to open the Log Explorer; right-click it to toggle tunnels. Off by default (menu bar only).
 
@@ -90,7 +92,7 @@ Or manually:
 
 > **Gatekeeper:** the app is ad-hoc signed, not notarized. The first time, right-click the app and choose **Open**, or run `xattr -dr com.apple.quarantine /Applications/WGToggle.app`.
 
-Each release includes a `.sha256` file you can use to check the download: `shasum -a 256 -c WGToggle-x.y.z.dmg.sha256`.
+Each release includes a `.sha256` file you can use to check the download: `shasum -a 256 -c WGToggle-x.y.z.dmg.sha256`. Releases also carry a build provenance attestation: `gh attestation verify WGToggle-x.y.z.dmg --repo ppodolak/wgtoggle` proves the DMG was built by this repository's CI.
 
 ## Usage
 
@@ -144,6 +146,8 @@ If you only ever use one tunnel, the official app is the simpler and more locked
 
 ![Log Explorer](docs/log-explorer.png)
 
+![Network Inspector](docs/network-inspector.png)
+
 <sub>Screenshots use demo data (`--demo`), not real tunnels.</sub>
 
 ## Running multiple tunnels
@@ -184,6 +188,8 @@ wgtoggle routes                # networks each tunnel routes through the VPN
 wgtoggle conflicts             # overlapping routes, default routes, shared DNS domains
 wgtoggle dns                   # active split-DNS resolvers
 wgtoggle dns repair            # clean up resolvers left by a crashed tunnel or a reboot
+wgtoggle check dev 10.8.0.1:22  # connectivity check for a tunnel (host:port or http(s) URL)
+wgtoggle health                # run all checks now (exit 1 if one fails)
 wgtoggle version               # app, wireguard-tools and helper versions
 wgtoggle diagnose              # status plus settings, no keys printed
 ```
@@ -287,7 +293,7 @@ cd wgtoggle
 ./build.sh          # → build/WGToggle.app and build/WGToggle.dmg
 ```
 
-Run the tests with `Tests/run.sh`. They cover config parsing, overlap checks, split-DNS conversion, QR decoding, version comparison and the helper's input checks.
+Run the tests with `Tests/run.sh` (`SANITIZE=thread Tests/run.sh` for Thread Sanitizer). `Tests/integration.sh` runs a real tunnel and the real helper install; it needs passwordless sudo, so it runs in CI. They cover config parsing, overlap checks, split-DNS conversion, QR decoding, version comparison and the helper's input checks.
 
 CI (`.github/workflows/build.yml`) runs the tests and builds every push and pull request. Pushing a tag like `v1.4.0` builds with that version, publishes a GitHub Release with the DMG and its checksum, and updates the cask in [ppodolak/homebrew-tap](https://github.com/ppodolak/homebrew-tap) (needs a `TAP_TOKEN` secret with write access to that repo):
 
@@ -345,10 +351,10 @@ WGToggle/
 
 Ideas being considered, roughly in order. Suggestions welcome in [issues](https://github.com/ppodolak/wgtoggle/issues).
 
-- [ ] Configurable health checks per tunnel (ping or HTTP to an internal host)
+- [x] Configurable connectivity checks per tunnel (TCP or HTTP to an internal host)
 - [x] Command line tool: `wgtoggle status --json`, `up`, `down`, `profile`
 - [x] Route and conflict view on the command line (`wgtoggle routes`, `wgtoggle conflicts`)
-- [ ] Route view in the app, conflicts highlighted before connecting
+- [x] Network Inspector: routes, DNS and conflicts in the app
 - [x] Two tunnels sharing a split-DNS domain (marker-based hooks)
 - [x] Root-owned tool copies without passwordless mode (**Settings → Use Root-Owned wg-quick**)
 - [x] Per-peer health for configs with several peers (passwordless mode)
